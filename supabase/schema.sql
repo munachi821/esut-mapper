@@ -1,5 +1,20 @@
 -- Run in Supabase SQL Editor.
--- Also create a public Storage bucket named: campus-photos
+
+insert into storage.buckets (id, name, public)
+values ('campus-photos', 'campus-photos', true)
+on conflict (id) do update set public = true;
+
+drop policy if exists "campus_photos_public_read" on storage.objects;
+create policy "campus_photos_public_read"
+  on storage.objects for select
+  to anon, authenticated
+  using (bucket_id = 'campus-photos');
+
+drop policy if exists "campus_photos_public_insert" on storage.objects;
+create policy "campus_photos_public_insert"
+  on storage.objects for insert
+  to anon, authenticated
+  with check (bucket_id = 'campus-photos');
 
 create table if not exists public.paths (
   id uuid primary key default gen_random_uuid(),
@@ -35,9 +50,19 @@ create table if not exists public.pins (
   created_at timestamptz not null default now()
 );
 
-alter publication supabase_realtime add table public.paths;
-alter publication supabase_realtime add table public.junction_pins;
-alter publication supabase_realtime add table public.pins;
+do $$
+declare
+  t text;
+begin
+  foreach t in array array['paths', 'junction_pins', 'pins'] loop
+    if not exists (
+      select 1 from pg_publication_tables
+      where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = t
+    ) then
+      execute format('alter publication supabase_realtime add table public.%I', t);
+    end if;
+  end loop;
+end $$;
 
 create or replace function public.save_path_with_split(
   p_scout_name text,

@@ -34,6 +34,7 @@ const ZONES = [
 const QUICK_BUILDINGS = ['ETF', 'Senate', 'SLT', 'Library', 'Admin'];
 const PHOTO_CATEGORIES = ['Cadence View', 'Building Entrance', 'Junction / Turn', 'Shortcut'] as const;
 const CADENCE_TARGET_M = 20;
+const ESUT_CENTER: Coord = [7.5375, 6.3052];
 
 interface PathRecord {
   id: string;
@@ -113,6 +114,9 @@ function MapperScreen() {
   });
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const [isCameraOpen, setIsCameraOpen] = useState(false);
   const frozenTelemetryRef = useRef<{ coord: Coord; accuracy: number | null; heading: number | null } | null>(null);
   const [frozenHeading, setFrozenHeading] = useState<number | null>(null);
   const [pendingBlob, setPendingBlob] = useState<Blob | null>(null);
@@ -125,6 +129,8 @@ function MapperScreen() {
   const isFlushingRef = useRef(false);
   const channelRef = useRef<ReturnType<typeof supabase.channel> | null>(null);
   const lastPresenceTsRef = useRef(0);
+  const [simMode, setSimMode] = useState(false);
+  const simModeRef = useRef(false);
 
   useEffect(() => {
     const onVisibility = async () => {
@@ -238,6 +244,75 @@ function MapperScreen() {
     };
   }, [profile, searchParams]);
 
+  const ingestGpsTick = useCallback(
+    (coord: Coord, acc: number, timestamp: number, scoutName?: string, scoutZone?: string) => {
+      userCoordRef.current = coord;
+      accuracyRef.current = acc;
+      setUserCoord(coord);
+      setAccuracy(acc);
+
+      const nowMs = Date.now();
+      if (scoutName && scoutZone && nowMs - lastPresenceTsRef.current >= 2000) {
+        lastPresenceTsRef.current = nowMs;
+        channelRef.current?.track({ name: scoutName, zone: scoutZone, lng: coord[0], lat: coord[1] });
+      }
+
+      if (acc > 15) return;
+
+      setGuidePin((currentGuide) => {
+        if (currentGuide && !arrivedPinIdsRef.current.has(currentGuide.id)) {
+          const dist = haversineMeters(coord, [currentGuide.lng, currentGuide.lat]);
+          if (dist <= 5) {
+            arrivedPinIdsRef.current.add(currentGuide.id);
+            navigator.vibrate?.([200, 100, 200]);
+            setArrivedPin(currentGuide);
+            return null;
+          }
+        }
+        return currentGuide;
+      });
+
+      if (recStateRef.current === 'RECORDING') {
+        const res = processGpsPoint({
+          incoming: coord,
+          accuracy: acc,
+          timestamp,
+          lastTimestamp: lastTickTsRef.current,
+          activePath: activePathRef.current,
+        });
+
+        if (res.accepted) {
+          lastTickTsRef.current = timestamp;
+          activePathRef.current = res.nextPath;
+          setActivePath(res.nextPath);
+          setPathDistance(calculatePathDistance(res.nextPath));
+
+          if (anchorCoordRef.current) {
+            const cDist = Math.round(haversineMeters(anchorCoordRef.current, coord));
+            setCadenceMeters(Math.min(CADENCE_TARGET_M, cDist));
+            if (cDist >= CADENCE_TARGET_M && !alertFiredRef.current) {
+              alertFiredRef.current = true;
+              setIsSnapDue(true);
+              navigator.vibrate?.([200, 100, 200]);
+              playCadenceChime();
+            }
+          }
+        }
+      }
+    },
+    []
+  );
+
+  const toggleSimMode = () => {
+    const next = !simModeRef.current;
+    simModeRef.current = next;
+    setSimMode(next);
+    if (next) {
+      setFocusCoord(ESUT_CENTER);
+      ingestGpsTick(ESUT_CENTER, 4, Date.now(), profile?.name, profile?.zone);
+    }
+  };
+
   const startHardwareSession = async (scoutProfile: { name: string; zone: string }) => {
     localStorage.setItem('esut_scout_profile', JSON.stringify(scoutProfile));
     window.dispatchEvent(new Event('esut-profile-updated'));
@@ -272,61 +347,10 @@ function MapperScreen() {
     if ('geolocation' in navigator) {
       navigator.geolocation.watchPosition(
         (pos) => {
+          if (simModeRef.current) return;
           const coord: Coord = [pos.coords.longitude, pos.coords.latitude];
           const acc = Math.round(pos.coords.accuracy);
-          userCoordRef.current = coord;
-          accuracyRef.current = acc;
-          setUserCoord(coord);
-          setAccuracy(acc);
-
-          const nowMs = Date.now();
-          if (nowMs - lastPresenceTsRef.current >= 2000) {
-            lastPresenceTsRef.current = nowMs;
-            channelRef.current?.track({ name: scoutProfile.name, zone: scoutProfile.zone, lng: coord[0], lat: coord[1] });
-          }
-
-          if (acc > 15) return;
-
-          setGuidePin((currentGuide) => {
-            if (currentGuide && !arrivedPinIdsRef.current.has(currentGuide.id)) {
-              const dist = haversineMeters(coord, [currentGuide.lng, currentGuide.lat]);
-              if (dist <= 5) {
-                arrivedPinIdsRef.current.add(currentGuide.id);
-                navigator.vibrate?.([200, 100, 200]);
-                setArrivedPin(currentGuide);
-                return null;
-              }
-            }
-            return currentGuide;
-          });
-
-          if (recStateRef.current === 'RECORDING') {
-            const res = processGpsPoint({
-              incoming: coord,
-              accuracy: acc,
-              timestamp: pos.timestamp,
-              lastTimestamp: lastTickTsRef.current,
-              activePath: activePathRef.current,
-            });
-
-            if (res.accepted) {
-              lastTickTsRef.current = pos.timestamp;
-              activePathRef.current = res.nextPath;
-              setActivePath(res.nextPath);
-              setPathDistance(calculatePathDistance(res.nextPath));
-
-              if (anchorCoordRef.current) {
-                const cDist = Math.round(haversineMeters(anchorCoordRef.current, coord));
-                setCadenceMeters(Math.min(CADENCE_TARGET_M, cDist));
-                if (cDist >= CADENCE_TARGET_M && !alertFiredRef.current) {
-                  alertFiredRef.current = true;
-                  setIsSnapDue(true);
-                  navigator.vibrate?.([200, 100, 200]);
-                  playCadenceChime();
-                }
-              }
-            }
-          }
+          ingestGpsTick(coord, acc, pos.timestamp, scoutProfile.name, scoutProfile.zone);
         },
         (err) => console.warn(err.message),
         { enableHighAccuracy: true, maximumAge: 0, timeout: 10000 }
@@ -403,14 +427,69 @@ function MapperScreen() {
     setPathDistance(calculatePathDistance(next));
   };
 
-  const handleTapSnap = () => {
+  const stopCameraStream = useCallback(() => {
+    streamRef.current?.getTracks().forEach((t) => t.stop());
+    streamRef.current = null;
+    setIsCameraOpen(false);
+  }, []);
+
+  useEffect(() => {
+    if (isCameraOpen && videoRef.current && streamRef.current) {
+      videoRef.current.srcObject = streamRef.current;
+      videoRef.current.play().catch(() => {});
+    }
+  }, [isCameraOpen]);
+
+  const handleTapSnap = async () => {
     const coord = userCoordRef.current;
     if (!coord) return alert('Waiting for GPS lock...');
     frozenTelemetryRef.current = { coord, accuracy: accuracyRef.current, heading: headingRef.current };
     setFrozenHeading(headingRef.current);
     setPhotoCategory(isSnapDue ? 'Cadence View' : 'Building Entrance');
     setPhotoLabel(suggestTurnLabel(activePathRef.current));
+
+    if (navigator.mediaDevices?.getUserMedia) {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } },
+          audio: false,
+        });
+        streamRef.current = stream;
+        setIsCameraOpen(true);
+        return;
+      } catch {
+        // Fallback to native file/camera input if permission denied or unavailable
+      }
+    }
     fileInputRef.current?.click();
+  };
+
+  const handleCaptureVideoFrame = () => {
+    const video = videoRef.current;
+    if (!video || !video.videoWidth || !video.videoHeight) return;
+    const maxWidth = 1080;
+    const scale = video.videoWidth > maxWidth ? maxWidth / video.videoWidth : 1;
+    const w = Math.round(video.videoWidth * scale);
+    const h = Math.round(video.videoHeight * scale);
+    const canvas = document.createElement('canvas');
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    ctx.drawImage(video, 0, 0, w, h);
+    canvas.toBlob(
+      (blob) => {
+        stopCameraStream();
+        if (!blob) return;
+        setPreviewUrl((prev) => {
+          if (prev) URL.revokeObjectURL(prev);
+          return URL.createObjectURL(blob);
+        });
+        setPendingBlob(blob);
+      },
+      'image/webp',
+      0.75
+    );
   };
 
   const handlePhotoFilePicked = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -421,12 +500,18 @@ function MapperScreen() {
       setFrozenHeading(null);
       return;
     }
-    const blob = await compressToWebP(file, 1080, 0.75);
-    setPreviewUrl((prev) => {
-      if (prev) URL.revokeObjectURL(prev);
-      return URL.createObjectURL(blob);
-    });
-    setPendingBlob(blob);
+    try {
+      const blob = await compressToWebP(file, 1080, 0.75);
+      setPreviewUrl((prev) => {
+        if (prev) URL.revokeObjectURL(prev);
+        return URL.createObjectURL(blob);
+      });
+      setPendingBlob(blob);
+    } catch {
+      alert('Could not process selected image.');
+      frozenTelemetryRef.current = null;
+      setFrozenHeading(null);
+    }
   };
 
   const handleSavePhotoPin = async () => {
@@ -623,16 +708,32 @@ function MapperScreen() {
             const found = junctionPins.find((p) => p.id === id);
             if (found) setSelectedPin(found);
           }}
+          onMapClick={(coord) => {
+            if (!simModeRef.current) return;
+            ingestGpsTick(coord, 4, Date.now(), profile?.name, profile?.zone);
+          }}
         />
 
-        {recState !== 'IDLE' && (
+        <div className="absolute left-3 top-3 z-10 flex flex-col gap-2">
           <button
-            onClick={handleUndoLast3}
-            className="absolute left-3 top-3 z-10 rounded-xl bg-slate-900/90 px-3 py-2 text-xs font-bold shadow-lg ring-1 ring-slate-700"
+            onClick={toggleSimMode}
+            className={`rounded-xl px-3 py-2 text-xs font-bold shadow-lg ring-1 ${
+              simMode
+                ? 'bg-emerald-600 text-white ring-emerald-400'
+                : 'bg-slate-900/90 text-slate-200 ring-slate-700'
+            }`}
           >
-            ↩ Undo 3 pts
+            {simMode ? '🧪 Sim ESUT: ON (tap map)' : '🧪 Sim ESUT'}
           </button>
-        )}
+          {recState !== 'IDLE' && (
+            <button
+              onClick={handleUndoLast3}
+              className="rounded-xl bg-slate-900/90 px-3 py-2 text-xs font-bold shadow-lg ring-1 ring-slate-700"
+            >
+              ↩ Undo 3 pts
+            </button>
+          )}
+        </div>
       </main>
 
       <footer className="flex h-[180px] shrink-0 flex-col justify-between border-t border-slate-800 bg-slate-900 px-3 pb-4 pt-3">
@@ -702,10 +803,43 @@ function MapperScreen() {
           type="file"
           accept="image/*"
           capture="environment"
-          className="hidden"
+          className="sr-only"
           onChange={handlePhotoFilePicked}
         />
       </footer>
+
+      {isCameraOpen && (
+        <div className="fixed inset-0 z-50 flex flex-col bg-black">
+          <video ref={videoRef} autoPlay playsInline muted className="flex-1 object-cover" />
+          <div className="flex items-center justify-between gap-3 bg-slate-950/90 px-4 py-5">
+            <button
+              onClick={() => {
+                stopCameraStream();
+                frozenTelemetryRef.current = null;
+                setFrozenHeading(null);
+              }}
+              className="rounded-xl bg-slate-800 px-4 py-3 text-xs font-bold text-white"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={handleCaptureVideoFrame}
+              className="flex-1 rounded-2xl bg-emerald-500 py-3.5 text-sm font-bold text-slate-950 active:scale-95"
+            >
+              📸 Capture Photo
+            </button>
+            <button
+              onClick={() => {
+                stopCameraStream();
+                fileInputRef.current?.click();
+              }}
+              className="rounded-xl bg-slate-800 px-3 py-3 text-xs font-bold text-slate-200"
+            >
+              📁 File
+            </button>
+          </div>
+        </div>
+      )}
 
       {pendingBlob && (
         <div className="fixed inset-0 z-50 flex items-end bg-black/60">
@@ -845,11 +979,15 @@ async function uploadPhotoRecord(
   payload: Extract<QueuedItem, { type: 'photo' }>['payload']
 ) {
   const safeZone = payload.zone.split(':')[0].replace(/\s+/g, '-').toLowerCase();
-  const path = `${safeZone}/${Date.now()}_${payload.scout_name}.webp`;
+  const safeScout = payload.scout_name.replace(/[^a-zA-Z0-9_-]/g, '_') || 'scout';
+  const path = `${safeZone}/${Date.now()}_${safeScout}.webp`;
   const { error: upErr } = await supabase.storage
     .from('campus-photos')
-    .upload(path, blob, { contentType: 'image/webp' });
-  if (upErr) throw upErr;
+    .upload(path, blob, { contentType: 'image/webp', upsert: true });
+  if (upErr) {
+    console.warn('Supabase storage upload failed:', upErr.message);
+    throw upErr;
+  }
 
   const { data } = supabase.storage.from('campus-photos').getPublicUrl(path);
   const { error: dbErr } = await supabase.from('pins').insert({ ...payload, image_url: data.publicUrl });

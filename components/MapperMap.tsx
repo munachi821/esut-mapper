@@ -5,7 +5,7 @@ import * as maplibregl from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import { Coord } from '@/lib/geoPipeline';
 
-const ESUT_CENTER: Coord = [7.54, 6.307];
+const ESUT_CENTER: Coord = [7.5375, 6.3052];
 
 const SATELLITE_STYLE: maplibregl.StyleSpecification = {
   version: 8,
@@ -18,14 +18,14 @@ const SATELLITE_STYLE: maplibregl.StyleSpecification = {
     },
     labels: {
       type: 'raster',
-      tiles: ['https://a.basemaps.cartocdn.com/rastertiles/voyager_only_labels/{z}/{x}/{y}.png'],
+      tiles: ['https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}'],
       tileSize: 256,
       maxzoom: 19,
     },
   },
   layers: [
     { id: 'esri-sat', type: 'raster', source: 'esri' },
-    { id: 'carto-labels', type: 'raster', source: 'labels' },
+    { id: 'esri-labels', type: 'raster', source: 'labels' },
   ],
 };
 
@@ -34,11 +34,7 @@ const STREETS_STYLE: maplibregl.StyleSpecification = {
   sources: {
     osm: {
       type: 'raster',
-      tiles: [
-        'https://a.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png',
-        'https://b.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png',
-        'https://c.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png',
-      ],
+      tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
       tileSize: 256,
       maxzoom: 19,
     },
@@ -77,6 +73,7 @@ interface MapperMapProps {
   guideTarget: Coord | null;
   focusCoord: Coord | null;
   onSelectJunctionPin: (pinId: string) => void;
+  onMapClick?: (coord: Coord) => void;
 }
 
 export default function MapperMap({
@@ -91,10 +88,12 @@ export default function MapperMap({
   guideTarget,
   focusCoord,
   onSelectJunctionPin,
+  onMapClick,
 }: MapperMapProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
   const [isSatellite, setIsSatellite] = useState(true);
+  const onMapClickRef = useRef(onMapClick);
 
   const latestRef = useRef({ paths, activePath, junctionPins, photoPins, teammates, userCoord, guideTarget });
 
@@ -273,7 +272,7 @@ export default function MapperMap({
       container: containerRef.current,
       style: SATELLITE_STYLE,
       center: focusCoord ?? ESUT_CENTER,
-      zoom: 17.5,
+      zoom: 16.5,
       pitch: 0,
     });
     mapRef.current = map;
@@ -283,6 +282,11 @@ export default function MapperMap({
     map.on('click', 'junction-pins-layer', (e) => {
       const id = e.features?.[0]?.properties?.id;
       if (id) onSelectJunctionPin(id);
+    });
+    map.on('click', (e) => {
+      const hits = map.queryRenderedFeatures(e.point, { layers: ['junction-pins-layer'] });
+      if (hits.length > 0) return;
+      onMapClickRef.current?.([e.lngLat.lng, e.lngLat.lat]);
     });
 
     let frameId: number;
@@ -301,6 +305,10 @@ export default function MapperMap({
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    onMapClickRef.current = onMapClick;
+  }, [onMapClick]);
 
   useEffect(() => {
     latestRef.current = { paths, activePath, junctionPins, photoPins, teammates, userCoord, guideTarget };
@@ -335,12 +343,28 @@ export default function MapperMap({
   return (
     <div className="relative h-full w-full">
       <div ref={containerRef} className="h-full w-full" />
-      <button
-        onClick={toggleBaseMap}
-        className="absolute right-3 top-3 z-10 rounded-xl bg-slate-900/90 px-3 py-2 text-xs font-bold text-white shadow-lg ring-1 ring-slate-700"
-      >
-        {isSatellite ? '🗺️ Streets' : '🛰️ Satellite'}
-      </button>
+      <div className="absolute right-3 top-3 z-10 flex flex-col items-end gap-2">
+        <button
+          onClick={toggleBaseMap}
+          className="rounded-xl bg-slate-900/90 px-3 py-2 text-xs font-bold text-white shadow-lg ring-1 ring-slate-700"
+        >
+          {isSatellite ? '🗺️ Streets' : '🛰️ Satellite'}
+        </button>
+        <button
+          onClick={() => mapRef.current?.flyTo({ center: ESUT_CENTER, zoom: 16.5 })}
+          className="rounded-xl bg-slate-900/90 px-3 py-1.5 text-xs font-bold text-emerald-300 shadow-lg ring-1 ring-slate-700"
+        >
+          🎯 ESUT
+        </button>
+        {userCoord && (
+          <button
+            onClick={() => mapRef.current?.flyTo({ center: userCoord, zoom: 17.5 })}
+            className="rounded-xl bg-slate-900/90 px-3 py-1.5 text-xs font-bold text-sky-300 shadow-lg ring-1 ring-slate-700"
+          >
+            📍 Me
+          </button>
+        )}
+      </div>
     </div>
   );
 }
