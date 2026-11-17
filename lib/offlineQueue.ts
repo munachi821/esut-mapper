@@ -8,11 +8,15 @@ export type QueuedItem =
       payload: {
         scout_name: string;
         zone: string;
+        name?: string | null;
         coordinates: Coord[];
         distance_m: number;
         split_path_id?: string | null;
         split_segment_idx?: number | null;
         split_coord?: Coord | null;
+        end_split_path_id?: string | null;
+        end_split_segment_idx?: number | null;
+        end_split_coord?: Coord | null;
       };
     }
   | {
