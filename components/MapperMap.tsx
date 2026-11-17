@@ -14,11 +14,13 @@ const SATELLITE_STYLE: maplibregl.StyleSpecification = {
       type: 'raster',
       tiles: ['https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'],
       tileSize: 256,
+      maxzoom: 19,
     },
     labels: {
       type: 'raster',
       tiles: ['https://a.basemaps.cartocdn.com/rastertiles/voyager_only_labels/{z}/{x}/{y}.png'],
       tileSize: 256,
+      maxzoom: 19,
     },
   },
   layers: [
@@ -32,8 +34,13 @@ const STREETS_STYLE: maplibregl.StyleSpecification = {
   sources: {
     osm: {
       type: 'raster',
-      tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
+      tiles: [
+        'https://a.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png',
+        'https://b.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png',
+        'https://c.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png',
+      ],
       tileSize: 256,
+      maxzoom: 19,
     },
   },
   layers: [{ id: 'osm-streets', type: 'raster', source: 'osm' }],
