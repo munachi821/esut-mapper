@@ -261,6 +261,7 @@ export default function MapperMap({
 
   useEffect(() => {
     if (!containerRef.current) return;
+    maplibregl.setWorkerUrl('/maplibre-gl-worker.mjs');
     const map = new maplibregl.Map({
       container: containerRef.current,
       style: SATELLITE_STYLE,
