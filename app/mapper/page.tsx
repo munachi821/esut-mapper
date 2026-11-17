@@ -31,15 +31,51 @@ const ZONES = [
   'Zone 5: Hostels / Medical',
 ];
 
-const QUICK_BUILDINGS = ['ETF', 'Senate', 'SLT', 'Library', 'Admin'];
+const QUICK_BUILDINGS = [
+  'ETF',
+  'Senate',
+  'SLT',
+  'Library',
+  'Admin',
+  'Engineering',
+  'Law',
+  'Medical',
+  'Hostels',
+  'Main Gate',
+  'Cafeteria',
+];
+
+const QUICK_PATH_NAMES = [
+  'Main Road',
+  'Footpath',
+  'Shortcut',
+  'Covered Walkway',
+  'Stairs',
+  'ETF Area',
+  'Senate Area',
+  'SLT Area',
+  'Hostels Area',
+];
+
+const QUICK_BRANCH_NOTES = [
+  'Shortcut',
+  'Unmapped Footpath',
+  'Side Gate',
+  'Stairs',
+  'Towards ETF',
+  'Towards Hostels',
+  'Towards SLT',
+];
+
 const PHOTO_CATEGORIES = ['Cadence View', 'Building Entrance', 'Junction / Turn', 'Shortcut'] as const;
-const CADENCE_TARGET_M = 20;
+const CADENCE_TARGET_M = 50;
 const ESUT_CENTER: Coord = [7.5375, 6.3052];
 
 interface PathRecord {
   id: string;
   scout_name: string;
   zone: string;
+  name?: string | null;
   coordinates: Coord[];
   distance_m: number;
 }
@@ -78,6 +114,9 @@ function MapperScreen() {
   const [nameInput, setNameInput] = useState('');
   const [zoneInput, setZoneInput] = useState(ZONES[1]);
   const [sessionReady, setSessionReady] = useState(false);
+  const [isZonePickerOpen, setIsZonePickerOpen] = useState(false);
+  const [toastMsg, setToastMsg] = useState<string | null>(null);
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
 
   const [userCoord, setUserCoord] = useState<Coord | null>(null);
   const [accuracy, setAccuracy] = useState<number | null>(null);
@@ -94,6 +133,19 @@ function MapperScreen() {
   const lastTickTsRef = useRef<number | null>(null);
   const startSnapMetaRef = useRef<{ splitTargetPathId?: string; splitSegmentIdx?: number; splitCoord?: Coord }>({});
 
+  const [pendingPathSave, setPendingPathSave] = useState<{
+    coords: Coord[];
+    distance: number;
+    endSnapMeta: { splitTargetPathId?: string; splitSegmentIdx?: number; splitCoord?: Coord };
+  } | null>(null);
+  const [pathNameInput, setPathNameInput] = useState('');
+  const [isSavingPath, setIsSavingPath] = useState(false);
+
+  const [isBranchModalOpen, setIsBranchModalOpen] = useState(false);
+  const [branchCoord, setBranchCoord] = useState<Coord | null>(null);
+  const [branchNoteInput, setBranchNoteInput] = useState('Shortcut');
+  const [isSavingBranch, setIsSavingBranch] = useState(false);
+
   const [cadenceMeters, setCadenceMeters] = useState(0);
   const [isSnapDue, setIsSnapDue] = useState(false);
   const anchorCoordRef = useRef<Coord | null>(null);
@@ -104,6 +156,8 @@ function MapperScreen() {
   const [photoPins, setPhotoPins] = useState<MapPhotoPin[]>([]);
   const [teammates, setTeammates] = useState<{ name: string; lng: number; lat: number }[]>([]);
   const [selectedPin, setSelectedPin] = useState<MapJunctionPin | null>(null);
+  const [selectedPhotoPin, setSelectedPhotoPin] = useState<MapPhotoPin | null>(null);
+  const [selectedPath, setSelectedPath] = useState<PathRecord | null>(null);
   const [guidePin, setGuidePin] = useState<MapJunctionPin | null>(null);
   const [arrivedPin, setArrivedPin] = useState<MapJunctionPin | null>(null);
   const arrivedPinIdsRef = useRef<Set<string>>(new Set());
@@ -131,6 +185,13 @@ function MapperScreen() {
   const lastPresenceTsRef = useRef(0);
   const [simMode, setSimMode] = useState(false);
   const simModeRef = useRef(false);
+
+  const showToast = useCallback((msg: string) => {
+    setToastMsg(msg);
+    setTimeout(() => {
+      setToastMsg((curr) => (curr === msg ? null : curr));
+    }, 2800);
+  }, []);
 
   useEffect(() => {
     const onVisibility = async () => {
@@ -203,22 +264,37 @@ function MapperScreen() {
       .channel('campus-mapper-live', { config: { presence: { key: profile.name } } })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'paths' }, (payload) => {
         if (payload.eventType === 'INSERT') {
-          setPaths((prev) => [...prev, payload.new as PathRecord]);
+          setPaths((prev) => (prev.some((p) => p.id === (payload.new as PathRecord).id) ? prev : [...prev, payload.new as PathRecord]));
         } else if (payload.eventType === 'UPDATE') {
           setPaths((prev) => prev.map((p) => (p.id === (payload.new as PathRecord).id ? (payload.new as PathRecord) : p)));
+        } else if (payload.eventType === 'DELETE') {
+          const oldId = (payload.old as { id?: string })?.id;
+          if (oldId) setPaths((prev) => prev.filter((p) => p.id !== oldId));
         }
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'junction_pins' }, (payload) => {
         if (payload.eventType === 'INSERT') {
-          setJunctionPins((prev) => [...prev, payload.new as MapJunctionPin]);
+          setJunctionPins((prev) =>
+            prev.some((p) => p.id === (payload.new as MapJunctionPin).id) ? prev : [...prev, payload.new as MapJunctionPin]
+          );
         } else if (payload.eventType === 'UPDATE') {
           setJunctionPins((prev) =>
             prev.map((p) => (p.id === (payload.new as MapJunctionPin).id ? (payload.new as MapJunctionPin) : p))
           );
+        } else if (payload.eventType === 'DELETE') {
+          const oldId = (payload.old as { id?: string })?.id;
+          if (oldId) setJunctionPins((prev) => prev.filter((p) => p.id !== oldId));
         }
       })
-      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'pins' }, (payload) => {
-        setPhotoPins((prev) => [...prev, payload.new as MapPhotoPin]);
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'pins' }, (payload) => {
+        if (payload.eventType === 'INSERT') {
+          setPhotoPins((prev) =>
+            prev.some((p) => p.id === (payload.new as MapPhotoPin).id) ? prev : [...prev, payload.new as MapPhotoPin]
+          );
+        } else if (payload.eventType === 'DELETE') {
+          const oldId = (payload.old as { id?: string })?.id;
+          if (oldId) setPhotoPins((prev) => prev.filter((p) => p.id !== oldId));
+        }
       })
       .on('presence', { event: 'sync' }, () => {
         const state = channel.presenceState() as Record<string, { name: string; lng?: number; lat?: number }[]>;
@@ -310,7 +386,19 @@ function MapperScreen() {
     if (next) {
       setFocusCoord(ESUT_CENTER);
       ingestGpsTick(ESUT_CENTER, 4, Date.now(), profile?.name, profile?.zone);
+      showToast('Simulation active: tap map to step along roads');
+    } else {
+      showToast('Switched to live device GPS');
     }
+  };
+
+  const handleZoneChange = (nextZone: string) => {
+    if (!profile) return;
+    const updated = { ...profile, zone: nextZone };
+    localStorage.setItem('esut_scout_profile', JSON.stringify(updated));
+    window.dispatchEvent(new Event('esut-profile-updated'));
+    setIsZonePickerOpen(false);
+    showToast(`Active zone set to ${nextZone.split(':')[0]}`);
   };
 
   const startHardwareSession = async (scoutProfile: { name: string; zone: string }) => {
@@ -362,7 +450,10 @@ function MapperScreen() {
 
   const handleStartPath = (overrideStart?: Coord) => {
     const base = overrideStart ?? userCoordRef.current;
-    if (!base) return alert('Waiting for GPS lock...');
+    if (!base) {
+      showToast('Wait for GPS lock or enable Sim in the top bar');
+      return;
+    }
 
     const snap = findTopologicalSnap(base, junctionPins, paths, 6);
     startSnapMetaRef.current = snap.splitTargetPathId
@@ -378,46 +469,83 @@ function MapperScreen() {
     setCadenceMeters(0);
     recStateRef.current = 'RECORDING';
     setRecState('RECORDING');
+    if (snap.snapped) showToast('Snapped start to nearest junction');
   };
 
-  const handleStopAndSavePath = async () => {
-    recStateRef.current = 'IDLE';
-    setRecState('IDLE');
+  const handleOpenSavePathSheet = () => {
     const raw = activePathRef.current;
-    activePathRef.current = [];
-    setActivePath([]);
+    if (raw.length < 2) {
+      recStateRef.current = 'IDLE';
+      setRecState('IDLE');
+      activePathRef.current = [];
+      setActivePath([]);
+      showToast('Walk at least 2 points before saving a path');
+      return;
+    }
 
-    if (raw.length < 2 || !profile) return;
+    recStateRef.current = 'PAUSED';
+    setRecState('PAUSED');
 
     const endSnap = findTopologicalSnap(raw[raw.length - 1], junctionPins, paths, 6);
     const finalCoords = endSnap.snapped ? [...raw.slice(0, -1), endSnap.coord] : raw;
     const dist = calculatePathDistance(finalCoords);
 
-    const payload = {
+    setPathNameInput('');
+    setConfirmDeleteId(null);
+    setPendingPathSave({
+      coords: finalCoords,
+      distance: dist,
+      endSnapMeta: endSnap.splitTargetPathId
+        ? { splitTargetPathId: endSnap.splitTargetPathId, splitSegmentIdx: endSnap.splitSegmentIdx, splitCoord: endSnap.coord }
+        : {},
+    });
+  };
+
+  const handleConfirmSavePath = async () => {
+    if (!pendingPathSave || !profile) return;
+    setIsSavingPath(true);
+
+    const payload: Extract<QueuedItem, { type: 'path' }>['payload'] = {
       scout_name: profile.name,
       zone: profile.zone,
-      coordinates: finalCoords,
-      distance_m: dist,
+      name: pathNameInput.trim() || null,
+      coordinates: pendingPathSave.coords,
+      distance_m: pendingPathSave.distance,
       split_path_id: startSnapMetaRef.current.splitTargetPathId ?? null,
       split_segment_idx: startSnapMetaRef.current.splitSegmentIdx ?? null,
       split_coord: startSnapMetaRef.current.splitCoord ?? null,
+      end_split_path_id: pendingPathSave.endSnapMeta.splitTargetPathId ?? null,
+      end_split_segment_idx: pendingPathSave.endSnapMeta.splitSegmentIdx ?? null,
+      end_split_coord: pendingPathSave.endSnapMeta.splitCoord ?? null,
     };
 
     try {
-      const { error } = await supabase.rpc('save_path_with_split', {
-        p_scout_name: payload.scout_name,
-        p_zone: payload.zone,
-        p_coordinates: payload.coordinates,
-        p_distance_m: payload.distance_m,
-        p_split_path_id: payload.split_path_id,
-        p_split_segment_idx: payload.split_segment_idx,
-        p_split_coord: payload.split_coord,
-      });
-      if (error) throw error;
+      await savePathRpc(payload);
+      showToast(`Path saved (${payload.distance_m}m)`);
     } catch {
       await enqueueOffline({ id: crypto.randomUUID(), type: 'path', createdAt: Date.now(), payload });
       setQueueCount((c) => c + 1);
+      showToast('Saved offline — will sync when connected');
+    } finally {
+      recStateRef.current = 'IDLE';
+      setRecState('IDLE');
+      activePathRef.current = [];
+      setActivePath([]);
+      setPathDistance(0);
+      setPendingPathSave(null);
+      setIsSavingPath(false);
     }
+  };
+
+  const handleDiscardActivePath = () => {
+    recStateRef.current = 'IDLE';
+    setRecState('IDLE');
+    activePathRef.current = [];
+    setActivePath([]);
+    setPathDistance(0);
+    setPendingPathSave(null);
+    setConfirmDeleteId(null);
+    showToast('Active path discarded');
   };
 
   const handleUndoLast3 = () => {
@@ -425,6 +553,7 @@ function MapperScreen() {
     activePathRef.current = next;
     setActivePath(next);
     setPathDistance(calculatePathDistance(next));
+    showToast('Removed last 3 points');
   };
 
   const stopCameraStream = useCallback(() => {
@@ -442,11 +571,14 @@ function MapperScreen() {
 
   const handleTapSnap = async () => {
     const coord = userCoordRef.current;
-    if (!coord) return alert('Waiting for GPS lock...');
+    if (!coord) {
+      showToast('Wait for GPS lock or enable Sim in the top bar');
+      return;
+    }
     frozenTelemetryRef.current = { coord, accuracy: accuracyRef.current, heading: headingRef.current };
     setFrozenHeading(headingRef.current);
     setPhotoCategory(isSnapDue ? 'Cadence View' : 'Building Entrance');
-    setPhotoLabel(suggestTurnLabel(activePathRef.current));
+    setPhotoLabel(isSnapDue ? '' : suggestTurnLabel(activePathRef.current));
 
     if (navigator.mediaDevices?.getUserMedia) {
       try {
@@ -458,7 +590,7 @@ function MapperScreen() {
         setIsCameraOpen(true);
         return;
       } catch {
-        // Fallback to native file/camera input if permission denied or unavailable
+        // Fallback to native file/camera input
       }
     }
     fileInputRef.current?.click();
@@ -508,7 +640,7 @@ function MapperScreen() {
       });
       setPendingBlob(blob);
     } catch {
-      alert('Could not process selected image.');
+      showToast('Could not read image file');
       frozenTelemetryRef.current = null;
       setFrozenHeading(null);
     }
@@ -532,9 +664,11 @@ function MapperScreen() {
 
     try {
       await uploadPhotoRecord(pendingBlob, payload);
+      showToast('Photo pin saved');
     } catch {
       await enqueueOffline({ id: crypto.randomUUID(), type: 'photo', createdAt: Date.now(), blob: pendingBlob, payload });
       setQueueCount((c) => c + 1);
+      showToast('Saved offline — will sync when connected');
     } finally {
       anchorCoordRef.current = coord;
       alertFiredRef.current = false;
@@ -551,25 +685,46 @@ function MapperScreen() {
     }
   };
 
-  const handleFlagBranch = async () => {
+  const handleOpenFlagBranch = () => {
     const coord =
       recStateRef.current !== 'IDLE' && activePathRef.current.length > 0
         ? activePathRef.current[activePathRef.current.length - 1]
         : userCoordRef.current;
-    if (!coord || !profile) return alert('Waiting for GPS lock...');
+    if (!coord || !profile) {
+      showToast('Wait for GPS lock or enable Sim in the top bar');
+      return;
+    }
     navigator.vibrate?.(60);
+    setBranchCoord(coord);
+    setBranchNoteInput('Shortcut');
+    setIsBranchModalOpen(true);
+  };
 
-    const payload = { lat: coord[1], lng: coord[0], created_by: profile.name };
+  const handleConfirmFlagBranch = async () => {
+    if (!branchCoord || !profile) return;
+    setIsSavingBranch(true);
+    const payload = {
+      lat: branchCoord[1],
+      lng: branchCoord[0],
+      created_by: profile.name,
+      note: branchNoteInput.trim() || 'Shortcut',
+    };
     try {
       const { data, error } = await supabase.from('junction_pins').insert(payload).select().single();
       if (error) throw error;
       if (data) {
         const link = `${window.location.origin}/mapper?pinId=${data.id}&lat=${data.lat}&lng=${data.lng}`;
         navigator.clipboard?.writeText(link).catch(() => {});
+        showToast('Shortcut pin dropped and link copied');
       }
     } catch {
       await enqueueOffline({ id: crypto.randomUUID(), type: 'pin', createdAt: Date.now(), payload });
       setQueueCount((c) => c + 1);
+      showToast('Saved offline — will sync when connected');
+    } finally {
+      setIsSavingBranch(false);
+      setIsBranchModalOpen(false);
+      setBranchCoord(null);
     }
   };
 
@@ -578,6 +733,31 @@ function MapperScreen() {
     await supabase.from('junction_pins').update({ status: 'claimed', claimed_by: profile.name }).eq('id', pin.id);
     setGuidePin(pin);
     setSelectedPin(null);
+    showToast('Shortcut claimed — follow the dashed guide line');
+  };
+
+  const handleDeleteJunctionPin = async (id: string) => {
+    await supabase.from('junction_pins').delete().eq('id', id);
+    setJunctionPins((prev) => prev.filter((p) => p.id !== id));
+    setSelectedPin(null);
+    setConfirmDeleteId(null);
+    showToast('Shortcut pin deleted');
+  };
+
+  const handleDeletePhotoPin = async (id: string) => {
+    await supabase.from('pins').delete().eq('id', id);
+    setPhotoPins((prev) => prev.filter((p) => p.id !== id));
+    setSelectedPhotoPin(null);
+    setConfirmDeleteId(null);
+    showToast('Photo pin deleted');
+  };
+
+  const handleDeletePath = async (id: string) => {
+    await supabase.from('paths').delete().eq('id', id);
+    setPaths((prev) => prev.filter((p) => p.id !== id));
+    setSelectedPath(null);
+    setConfirmDeleteId(null);
+    showToast('Mapped path deleted');
   };
 
   const handleExportGeoJSON = () => {
@@ -586,12 +766,26 @@ function MapperScreen() {
       features: [
         ...paths.map((p) => ({
           type: 'Feature',
-          properties: { type: 'path', scout: p.scout_name, zone: p.zone, distance_m: p.distance_m },
+          properties: {
+            type: 'path',
+            id: p.id,
+            name: p.name ?? null,
+            scout: p.scout_name,
+            zone: p.zone,
+            distance_m: p.distance_m,
+          },
           geometry: { type: 'LineString', coordinates: p.coordinates },
         })),
         ...photoPins.map((ph) => ({
           type: 'Feature',
-          properties: { type: 'pin', category: ph.category, label: ph.label, heading: ph.heading },
+          properties: {
+            type: 'pin',
+            id: ph.id,
+            category: ph.category,
+            label: ph.label,
+            heading: ph.heading,
+            image_url: ph.image_url,
+          },
           geometry: { type: 'Point', coordinates: [ph.lng, ph.lat] },
         })),
       ],
@@ -601,200 +795,272 @@ function MapperScreen() {
     a.href = URL.createObjectURL(blob);
     a.download = `esut-agbani-${new Date().toISOString().slice(0, 10)}.geojson`;
     a.click();
+    showToast('Downloaded campus GeoJSON');
   };
 
   const gpsBad = accuracy === null || accuracy > 15;
+  const cadenceRatio = Math.min(1, cadenceMeters / CADENCE_TARGET_M);
 
   return (
-    <div className="flex h-[100dvh] w-screen flex-col overflow-hidden bg-slate-950 text-white select-none">
-      {(!profile || !sessionReady) && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/95 p-5">
-          <div className="w-full max-w-sm rounded-3xl border border-slate-800 bg-slate-900 p-6 shadow-2xl">
-            <h1 className="mb-1 text-xl font-bold">ESUT Campus Mapper</h1>
-            <p className="mb-4 text-xs text-slate-400">
-              {profile
-                ? `Welcome back, ${profile.name}. Tap below to enable GPS, Compass & Wake Lock.`
-                : 'Enter your scout name and assigned ESUT Agbani zone.'}
-            </p>
-            {!profile && (
-              <>
-                <input
-                  value={nameInput}
-                  onChange={(e) => setNameInput(e.target.value)}
-                  placeholder="Your Name (e.g., Munachi)"
-                  className="mb-3 w-full rounded-xl bg-slate-800 px-3 py-3 text-sm outline-none ring-1 ring-slate-700 focus:ring-emerald-500"
-                />
-                <select
-                  value={zoneInput}
-                  onChange={(e) => setZoneInput(e.target.value)}
-                  className="mb-4 w-full rounded-xl bg-slate-800 px-3 py-3 text-sm outline-none ring-1 ring-slate-700"
-                >
-                  {ZONES.map((z) => (
-                    <option key={z} value={z}>
-                      {z}
-                    </option>
-                  ))}
-                </select>
-              </>
-            )}
-            <button
-              onClick={() => {
-                const p = profile ?? { name: nameInput.trim() || 'Scout', zone: zoneInput };
-                startHardwareSession(p);
-              }}
-              className="w-full rounded-2xl bg-emerald-600 py-3.5 text-sm font-bold text-white active:scale-95"
-            >
-              Start Mapping Session
-            </button>
-          </div>
-        </div>
-      )}
+    <div className="relative h-dvh w-screen overflow-hidden bg-slate-950 text-slate-100 select-none">
+      {/* Full-bleed Map Canvas */}
+      <MapperMap
+        paths={paths}
+        activePath={activePath}
+        junctionPins={junctionPins}
+        photoPins={photoPins}
+        teammates={teammates}
+        userCoord={userCoord}
+        heading={heading}
+        isRecording={recState === 'RECORDING'}
+        guideTarget={guidePin ? [guidePin.lng, guidePin.lat] : null}
+        focusCoord={focusCoord}
+        onSelectJunctionPin={(id) => {
+          const found = junctionPins.find((p) => p.id === id);
+          if (found) {
+            setConfirmDeleteId(null);
+            setSelectedPin(found);
+          }
+        }}
+        onSelectPhotoPin={(id) => {
+          const found = photoPins.find((p) => p.id === id);
+          if (found) {
+            setConfirmDeleteId(null);
+            setSelectedPhotoPin(found);
+          }
+        }}
+        onSelectPath={(id) => {
+          const found = paths.find((p) => p.id === id);
+          if (found) {
+            setConfirmDeleteId(null);
+            setSelectedPath(found);
+          }
+        }}
+        onMapClick={(coord) => {
+          if (!simModeRef.current) return;
+          ingestGpsTick(coord, 4, Date.now(), profile?.name, profile?.zone);
+        }}
+      />
 
-      <header className="flex h-[56px] shrink-0 items-center justify-between border-b border-slate-800 bg-slate-900/90 px-3 backdrop-blur">
-        <div className="flex items-center gap-1.5">
-          <span className="rounded-lg bg-slate-800 px-2 py-1 text-[11px] font-bold">
-            {profile?.zone.split(':')[0] ?? 'Zone'} • {profile?.name ?? 'Scout'}
-          </span>
+      {/* Top Floating Instrument Bar */}
+      <header className="pointer-events-none absolute inset-x-3 top-3 z-20 mx-auto flex max-w-lg items-center justify-between gap-2 rounded-2xl border border-white/10 bg-slate-950/90 px-3 py-2 shadow-lg backdrop-blur-md">
+        <div className="pointer-events-auto flex min-w-0 items-center gap-1.5">
+          <button
+            type="button"
+            onClick={() => setIsZonePickerOpen(true)}
+            aria-label="Switch active campus zone"
+            className="flex min-w-0 items-center gap-1.5 rounded-xl border border-white/10 bg-slate-900 px-2.5 py-1.5 text-xs font-medium text-slate-100 transition-transform duration-150 ease-out hover:bg-slate-800 active:scale-95"
+          >
+            <span className="size-2 shrink-0 rounded-full bg-sky-400" />
+            <span className="truncate">
+              {profile?.zone.split(':')[0] ?? 'Zone 1'} / {profile?.name ?? 'Scout'}
+            </span>
+            <svg className="size-3.5 shrink-0 text-slate-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <polyline points="6 9 12 15 18 9" />
+            </svg>
+          </button>
+
           <span
-            className={`rounded-lg px-2 py-1 text-[11px] font-bold ${
-              gpsBad ? 'bg-red-500/20 text-red-400' : 'bg-emerald-500/20 text-emerald-400'
+            className={`flex shrink-0 items-center gap-1.5 rounded-xl border px-2.5 py-1.5 text-xs font-medium tabular-nums ${
+              gpsBad
+                ? 'border-rose-500/30 bg-rose-950/60 text-rose-300'
+                : 'border-emerald-500/30 bg-emerald-950/60 text-emerald-300'
             }`}
           >
-            ● {accuracy !== null ? `±${accuracy}m` : 'No GPS'}
+            <span className={`size-1.5 rounded-full ${gpsBad ? 'bg-rose-400' : 'bg-emerald-400'}`} />
+            {accuracy !== null ? `±${accuracy}m` : 'No GPS'}
           </span>
         </div>
 
-        <span
-          className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${
-            queueCount > 0 ? 'bg-amber-500/20 text-amber-300' : 'bg-emerald-500/15 text-emerald-400'
-          }`}
-        >
-          {queueCount > 0 ? `● ${queueCount} Pending` : 'Synced ✓'}
-        </span>
+        <div className="pointer-events-auto flex shrink-0 items-center gap-1.5">
+          {queueCount > 0 && (
+            <span className="rounded-xl border border-amber-500/30 bg-amber-950/60 px-2 py-1.5 text-xs font-medium text-amber-300 tabular-nums">
+              {queueCount} queued
+            </span>
+          )}
 
-        <div className="flex items-center gap-1.5">
-          <div className="flex -space-x-1">
-            {teammates.slice(0, 3).map((t) => (
-              <span
-                key={t.name}
-                className="flex h-6 w-6 items-center justify-center rounded-full border border-slate-900 bg-purple-600 text-[10px] font-bold"
-              >
-                {t.name[0]}
-              </span>
-            ))}
-          </div>
+          {teammates.length > 0 && (
+            <div className="flex -space-x-1">
+              {teammates.slice(0, 3).map((t) => (
+                <span
+                  key={t.name}
+                  title={t.name}
+                  className="flex size-6 items-center justify-center rounded-full border border-slate-950 bg-slate-800 text-[10px] font-semibold text-slate-200"
+                >
+                  {t.name[0]}
+                </span>
+              ))}
+            </div>
+          )}
+
           <button
-            onClick={handleExportGeoJSON}
-            className="rounded-lg bg-slate-800 px-2 py-1 text-[11px] font-bold hover:bg-slate-700"
+            type="button"
+            onClick={toggleSimMode}
+            aria-pressed={simMode}
+            className={`rounded-xl border px-2.5 py-1.5 text-xs font-medium transition-transform duration-150 ease-out active:scale-95 ${
+              simMode
+                ? 'border-emerald-500/40 bg-emerald-950/70 text-emerald-300'
+                : 'border-white/10 bg-slate-900 text-slate-300 hover:bg-slate-800'
+            }`}
           >
-            .geojson
+            {simMode ? 'Sim: On' : 'Sim'}
+          </button>
+
+          <button
+            type="button"
+            onClick={handleExportGeoJSON}
+            aria-label="Export mapped data as GeoJSON"
+            className="flex size-8 items-center justify-center rounded-xl border border-white/10 bg-slate-900 text-slate-200 transition-transform duration-150 ease-out hover:bg-slate-800 active:scale-95"
+          >
+            <svg className="size-4 text-slate-300" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+              <polyline points="7 10 12 15 17 10" />
+              <line x1="12" y1="15" x2="12" y2="3" />
+            </svg>
           </button>
         </div>
       </header>
 
-      <main className="relative flex-1">
-        <MapperMap
-          paths={paths}
-          activePath={activePath}
-          junctionPins={junctionPins}
-          photoPins={photoPins}
-          teammates={teammates}
-          userCoord={userCoord}
-          heading={heading}
-          isRecording={recState === 'RECORDING'}
-          guideTarget={guidePin ? [guidePin.lng, guidePin.lat] : null}
-          focusCoord={focusCoord}
-          onSelectJunctionPin={(id) => {
-            const found = junctionPins.find((p) => p.id === id);
-            if (found) setSelectedPin(found);
-          }}
-          onMapClick={(coord) => {
-            if (!simModeRef.current) return;
-            ingestGpsTick(coord, 4, Date.now(), profile?.name, profile?.zone);
-          }}
-        />
-
-        <div className="absolute left-3 top-3 z-10 flex flex-col gap-2">
-          <button
-            onClick={toggleSimMode}
-            className={`rounded-xl px-3 py-2 text-xs font-bold shadow-lg ring-1 ${
-              simMode
-                ? 'bg-emerald-600 text-white ring-emerald-400'
-                : 'bg-slate-900/90 text-slate-200 ring-slate-700'
-            }`}
-          >
-            {simMode ? '🧪 Sim ESUT: ON (tap map)' : '🧪 Sim ESUT'}
-          </button>
-          {recState !== 'IDLE' && (
-            <button
-              onClick={handleUndoLast3}
-              className="rounded-xl bg-slate-900/90 px-3 py-2 text-xs font-bold shadow-lg ring-1 ring-slate-700"
-            >
-              ↩ Undo 3 pts
-            </button>
-          )}
-        </div>
-      </main>
-
-      <footer className="flex h-[180px] shrink-0 flex-col justify-between border-t border-slate-800 bg-slate-900 px-3 pb-4 pt-3">
-        <div>
-          <div className="mb-1.5 flex justify-between text-xs font-semibold">
-            <span className={isSnapDue ? 'animate-pulse text-emerald-400' : 'text-slate-300'}>
-              {isSnapDue ? '📸 SNAP NOW (20m reached)' : `${cadenceMeters}m / ${CADENCE_TARGET_M}m to next photo`}
-            </span>
-            <span className="text-sky-400">{pathDistance}m recorded</span>
+      {/* Non-blocking Status Banner */}
+      {toastMsg && (
+        <div role="status" aria-live="polite" className="pointer-events-none absolute inset-x-0 top-20 z-30 flex justify-center px-4">
+          <div className="rounded-xl border border-white/15 bg-slate-900/95 px-3.5 py-2 text-xs font-medium text-slate-100 shadow-lg">
+            {toastMsg}
           </div>
-          <div className="h-2.5 w-full overflow-hidden rounded-full bg-slate-800">
+        </div>
+      )}
+
+      {/* Simulation Instruction Pill */}
+      {simMode && !toastMsg && (
+        <div className="pointer-events-none absolute left-3 top-20 z-10 rounded-xl border border-emerald-500/30 bg-slate-950/90 px-3 py-1.5 text-xs font-medium text-emerald-300 shadow">
+          Tap map to step along ESUT roads
+        </div>
+      )}
+
+      {/* Bottom Floating Control Dock */}
+      <footer className="pointer-events-auto absolute inset-x-3 bottom-3 z-20 mx-auto max-w-lg rounded-3xl border border-white/10 bg-slate-950/90 p-3.5 pb-[max(0.875rem,env(safe-area-inset-bottom))] shadow-lg backdrop-blur-md">
+        {/* Cadence & Distance Telemetry Row */}
+        <div className="mb-3">
+          <div className="mb-1.5 flex items-center justify-between gap-2 text-xs">
+            <span className={`font-medium tabular-nums ${isSnapDue ? 'text-emerald-400' : 'text-slate-300'}`}>
+              {isSnapDue
+                ? `50m reached — snap a road view photo`
+                : `Next road photo: ${cadenceMeters}m / ${CADENCE_TARGET_M}m`}
+            </span>
+
+            <div className="flex items-center gap-2">
+              {recState !== 'IDLE' && (
+                <button
+                  type="button"
+                  onClick={handleUndoLast3}
+                  className="rounded-lg border border-white/10 bg-slate-900 px-2 py-0.5 text-[11px] font-medium text-slate-300 transition-transform duration-150 ease-out hover:bg-slate-800 active:scale-95"
+                >
+                  Undo 3 pts
+                </button>
+              )}
+              <span className="rounded-lg border border-white/10 bg-slate-900 px-2 py-0.5 text-xs font-semibold text-slate-200 tabular-nums">
+                {pathDistance}m
+              </span>
+            </div>
+          </div>
+
+          {/* Compositor-only scaleX progress bar */}
+          <div className="h-1.5 w-full overflow-hidden rounded-full bg-slate-800">
             <div
-              className={`h-full transition-all duration-300 ${isSnapDue ? 'animate-pulse bg-emerald-400' : 'bg-sky-500'}`}
-              style={{ width: `${Math.min(100, (cadenceMeters / CADENCE_TARGET_M) * 100)}%` }}
+              className={`size-full origin-left rounded-full transition-transform duration-150 ease-out ${
+                isSnapDue ? 'bg-emerald-400' : 'bg-sky-400'
+              }`}
+              style={{ transform: `scaleX(${cadenceRatio})` }}
             />
           </div>
         </div>
 
-        <div className="flex h-20 gap-2">
+        {/* Disciplined Action Grid: One primary accent, quiet secondary surfaces */}
+        <div className="grid grid-cols-12 gap-2">
           {recState === 'IDLE' ? (
             <button
+              type="button"
               onClick={() => handleStartPath()}
-              className="w-[40%] rounded-2xl bg-emerald-600 text-sm font-bold text-white shadow-lg active:scale-95"
+              className="col-span-5 flex h-13 items-center justify-center gap-2 rounded-2xl bg-emerald-500 text-sm font-semibold text-slate-950 shadow transition-transform duration-150 ease-out hover:bg-emerald-400 active:scale-95"
             >
-              ▶ Start Path
+              <svg className="size-4 fill-current" viewBox="0 0 24 24">
+                <polygon points="5 3 19 12 5 21 5 3" />
+              </svg>
+              <span>Start Path</span>
             </button>
           ) : (
-            <div className="flex w-[40%] gap-1.5">
+            <div className="col-span-5 grid grid-cols-2 gap-1.5">
               <button
+                type="button"
                 onClick={() => {
                   const next = recState === 'RECORDING' ? 'PAUSED' : 'RECORDING';
                   recStateRef.current = next;
                   setRecState(next);
                 }}
-                className="flex-1 rounded-2xl bg-amber-500 text-xs font-bold text-slate-950 active:scale-95"
+                className="flex h-13 flex-col items-center justify-center rounded-2xl border border-white/10 bg-slate-900 text-xs font-medium text-slate-200 transition-transform duration-150 ease-out hover:bg-slate-800 active:scale-95"
               >
-                {recState === 'RECORDING' ? '⏸ Pause' : '▶ Resume'}
+                {recState === 'RECORDING' ? (
+                  <>
+                    <svg className="mb-0.5 size-3.5 fill-current text-amber-400" viewBox="0 0 24 24">
+                      <rect x="6" y="4" width="4" height="16" />
+                      <rect x="14" y="4" width="4" height="16" />
+                    </svg>
+                    <span>Pause</span>
+                  </>
+                ) : (
+                  <>
+                    <svg className="mb-0.5 size-3.5 fill-current text-emerald-400" viewBox="0 0 24 24">
+                      <polygon points="5 3 19 12 5 21 5 3" />
+                    </svg>
+                    <span>Resume</span>
+                  </>
+                )}
               </button>
               <button
-                onClick={handleStopAndSavePath}
-                className="flex-1 rounded-2xl bg-rose-600 text-xs font-bold text-white active:scale-95"
+                type="button"
+                onClick={handleOpenSavePathSheet}
+                className="flex h-13 flex-col items-center justify-center rounded-2xl bg-emerald-500 text-xs font-semibold text-slate-950 transition-transform duration-150 ease-out hover:bg-emerald-400 active:scale-95"
               >
-                ⏹ Save
+                <svg className="mb-0.5 size-3.5 fill-current" viewBox="0 0 24 24">
+                  <polyline points="20 6 9 17 4 12" fill="none" stroke="currentColor" strokeWidth="3" />
+                </svg>
+                <span>Save</span>
               </button>
             </div>
           )}
 
           <button
+            type="button"
             onClick={handleTapSnap}
-            className={`w-[35%] rounded-2xl text-sm font-bold text-white shadow-lg active:scale-95 ${
-              isSnapDue ? 'animate-pulse bg-emerald-500' : 'bg-sky-600'
+            className={`col-span-4 flex h-13 items-center justify-center gap-2 rounded-2xl text-sm font-semibold transition-transform duration-150 ease-out active:scale-95 ${
+              isSnapDue
+                ? 'bg-emerald-500 text-slate-950 shadow'
+                : 'border border-white/10 bg-slate-900 text-slate-100 hover:bg-slate-800'
             }`}
           >
-            📷 Snap
+            <svg
+              className={`size-4 ${isSnapDue ? 'text-slate-950' : 'text-sky-400'}`}
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+            >
+              <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />
+              <circle cx="12" cy="13" r="4" />
+            </svg>
+            <span>Snap</span>
           </button>
 
           <button
-            onClick={handleFlagBranch}
-            className="w-[25%] rounded-2xl bg-orange-600 text-sm font-bold text-white shadow-lg active:scale-95"
+            type="button"
+            onClick={handleOpenFlagBranch}
+            className="col-span-3 flex h-13 flex-col items-center justify-center rounded-2xl border border-white/10 bg-slate-900 text-xs font-medium text-slate-200 transition-transform duration-150 ease-out hover:bg-slate-800 active:scale-95"
           >
-            🚩 Branch
+            <svg className="mb-0.5 size-3.5 text-amber-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z" />
+              <line x1="4" y1="22" x2="4" y2="15" />
+            </svg>
+            <span>Branch</span>
           </button>
         </div>
 
@@ -808,83 +1074,351 @@ function MapperScreen() {
         />
       </footer>
 
-      {isCameraOpen && (
-        <div className="fixed inset-0 z-50 flex flex-col bg-black">
-          <video ref={videoRef} autoPlay playsInline muted className="flex-1 object-cover" />
-          <div className="flex items-center justify-between gap-3 bg-slate-950/90 px-4 py-5">
+      {/* Onboarding & Hardware Handshake Modal */}
+      {(!profile || !sessionReady) && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="onboarding-title"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/90 p-5 backdrop-blur-sm"
+        >
+          <div className="w-full max-w-sm rounded-3xl border border-white/10 bg-slate-900 p-6 shadow-xl">
+            <div className="mb-3 inline-flex items-center gap-2 rounded-full border border-white/10 bg-slate-950 px-3 py-1 text-xs font-medium text-slate-300">
+              <span className="size-2 rounded-full bg-emerald-400" />
+              ESUT Agbani Field Mapper
+            </div>
+            <h1 id="onboarding-title" className="mb-1 text-xl font-semibold text-balance text-slate-100">
+              {profile ? `Ready to map, ${profile.name}` : 'Set up your scout profile'}
+            </h1>
+            <p className="mb-5 text-xs leading-relaxed text-pretty text-slate-400">
+              {profile
+                ? 'Start the session to enable GPS tracking, compass heading, and screen wake lock.'
+                : 'Enter your name and starting zone. You can switch zones at any time from the top bar.'}
+            </p>
+            {!profile && (
+              <>
+                <label htmlFor="scout-name-input" className="mb-1.5 block text-xs font-medium text-slate-300">
+                  Scout name
+                </label>
+                <input
+                  id="scout-name-input"
+                  value={nameInput}
+                  onChange={(e) => setNameInput(e.target.value)}
+                  placeholder="Munachi"
+                  className="mb-3.5 w-full rounded-xl border border-white/10 bg-slate-950 px-3.5 py-2.5 text-sm text-slate-100 outline-none focus:border-emerald-500"
+                />
+                <label htmlFor="scout-zone-select" className="mb-1.5 block text-xs font-medium text-slate-300">
+                  Starting zone
+                </label>
+                <select
+                  id="scout-zone-select"
+                  value={zoneInput}
+                  onChange={(e) => setZoneInput(e.target.value)}
+                  className="mb-5 w-full rounded-xl border border-white/10 bg-slate-950 px-3.5 py-2.5 text-sm text-slate-100 outline-none focus:border-emerald-500"
+                >
+                  {ZONES.map((z) => (
+                    <option key={z} value={z}>
+                      {z}
+                    </option>
+                  ))}
+                </select>
+              </>
+            )}
             <button
+              type="button"
               onClick={() => {
-                stopCameraStream();
-                frozenTelemetryRef.current = null;
-                setFrozenHeading(null);
+                const p = profile ?? { name: nameInput.trim() || 'Scout', zone: zoneInput };
+                startHardwareSession(p);
               }}
-              className="rounded-xl bg-slate-800 px-4 py-3 text-xs font-bold text-white"
+              className="w-full rounded-2xl bg-emerald-500 py-3 text-sm font-semibold text-slate-950 transition-transform duration-150 ease-out hover:bg-emerald-400 active:scale-95"
             >
-              Cancel
-            </button>
-            <button
-              onClick={handleCaptureVideoFrame}
-              className="flex-1 rounded-2xl bg-emerald-500 py-3.5 text-sm font-bold text-slate-950 active:scale-95"
-            >
-              📸 Capture Photo
-            </button>
-            <button
-              onClick={() => {
-                stopCameraStream();
-                fileInputRef.current?.click();
-              }}
-              className="rounded-xl bg-slate-800 px-3 py-3 text-xs font-bold text-slate-200"
-            >
-              📁 File
+              Start Mapping Session
             </button>
           </div>
         </div>
       )}
 
+      {/* Quick Zone Switcher Sheet */}
+      {isZonePickerOpen && profile && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="Switch active campus zone"
+          className="fixed inset-0 z-50 flex items-end justify-center bg-black/60"
+          onClick={() => setIsZonePickerOpen(false)}
+        >
+          <div
+            className="w-full max-w-lg rounded-t-3xl border-t border-white/10 bg-slate-900 p-5 pb-[max(1.5rem,env(safe-area-inset-bottom))]"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h2 className="mb-1 text-base font-semibold text-balance">Switch active zone</h2>
+            <p className="mb-3 text-xs text-pretty text-slate-400">
+              Choose the campus zone you are walking in right now.
+            </p>
+            <div className="space-y-1.5">
+              {ZONES.map((z) => {
+                const active = profile.zone === z;
+                return (
+                  <button
+                    type="button"
+                    key={z}
+                    onClick={() => handleZoneChange(z)}
+                    className={`flex w-full items-center justify-between rounded-xl border px-3.5 py-2.5 text-left text-xs font-medium ${
+                      active
+                        ? 'border-emerald-500/40 bg-emerald-950/50 text-emerald-200'
+                        : 'border-white/5 bg-slate-950 text-slate-300 hover:bg-slate-800'
+                    }`}
+                  >
+                    <span>{z}</span>
+                    {active && <span className="text-emerald-400">Current</span>}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Save Path & Name Area/Route Modal */}
+      {pendingPathSave && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="save-path-title"
+          className="fixed inset-0 z-50 flex items-end justify-center bg-black/65"
+        >
+          <div className="w-full max-w-lg rounded-t-3xl border-t border-white/10 bg-slate-900 p-5 pb-[max(1.5rem,env(safe-area-inset-bottom))]">
+            <div className="mb-3 flex items-start justify-between gap-3">
+              <div>
+                <h2 id="save-path-title" className="text-base font-semibold text-balance tabular-nums">
+                  Save {pendingPathSave.distance}m path
+                </h2>
+                <p className="text-xs text-pretty text-slate-400 tabular-nums">
+                  {pendingPathSave.coords.length} points recorded. Add an optional road or area name.
+                </p>
+              </div>
+              {confirmDeleteId === 'active-path' ? (
+                <button
+                  type="button"
+                  onClick={handleDiscardActivePath}
+                  className="rounded-xl bg-rose-600 px-3 py-1.5 text-xs font-semibold text-white"
+                >
+                  Confirm Discard
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => setConfirmDeleteId('active-path')}
+                  className="rounded-xl border border-rose-500/30 bg-rose-950/50 px-2.5 py-1.5 text-xs font-medium text-rose-300"
+                >
+                  Discard
+                </button>
+              )}
+            </div>
+
+            <div className="mb-3 flex flex-wrap gap-1.5">
+              {QUICK_PATH_NAMES.map((chip) => (
+                <button
+                  type="button"
+                  key={chip}
+                  onClick={() => setPathNameInput((prev) => (prev ? `${prev}, ${chip}` : chip))}
+                  className="rounded-lg border border-white/10 bg-slate-950 px-2.5 py-1 text-xs font-medium text-slate-300 hover:bg-slate-800"
+                >
+                  + {chip}
+                </button>
+              ))}
+            </div>
+
+            <input
+              value={pathNameInput}
+              onChange={(e) => setPathNameInput(e.target.value)}
+              placeholder="Road or shortcut name (e.g., Main Road to ETF)"
+              className="mb-4 w-full rounded-xl border border-white/10 bg-slate-950 px-3.5 py-2.5 text-sm text-slate-100 outline-none focus:border-emerald-500"
+            />
+
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setPendingPathSave(null);
+                  setConfirmDeleteId(null);
+                  recStateRef.current = 'RECORDING';
+                  setRecState('RECORDING');
+                }}
+                className="flex-1 rounded-xl border border-white/10 bg-slate-950 py-3 text-xs font-semibold text-slate-200"
+              >
+                Keep Walking
+              </button>
+              <button
+                type="button"
+                disabled={isSavingPath}
+                onClick={handleConfirmSavePath}
+                className="flex-[2] rounded-xl bg-emerald-500 py-3 text-xs font-semibold text-slate-950"
+              >
+                {isSavingPath ? 'Saving...' : 'Save Path'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Flag Shortcut / Branch Modal */}
+      {isBranchModalOpen && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="flag-branch-title"
+          className="fixed inset-0 z-50 flex items-end justify-center bg-black/65"
+          onClick={() => setIsBranchModalOpen(false)}
+        >
+          <div
+            className="w-full max-w-lg rounded-t-3xl border-t border-white/10 bg-slate-900 p-5 pb-[max(1.5rem,env(safe-area-inset-bottom))]"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h2 id="flag-branch-title" className="mb-1 text-base font-semibold text-balance">
+              Flag unmapped shortcut
+            </h2>
+            <p className="mb-3 text-xs text-pretty text-slate-400">
+              Drop a pin here so you or a teammate can map this branch next.
+            </p>
+            <div className="mb-3 flex flex-wrap gap-1.5">
+              {QUICK_BRANCH_NOTES.map((chip) => (
+                <button
+                  type="button"
+                  key={chip}
+                  onClick={() => setBranchNoteInput(chip)}
+                  className={`rounded-lg border px-2.5 py-1 text-xs font-medium ${
+                    branchNoteInput === chip
+                      ? 'border-amber-400/50 bg-amber-950/60 text-amber-200'
+                      : 'border-white/10 bg-slate-950 text-slate-300'
+                  }`}
+                >
+                  {chip}
+                </button>
+              ))}
+            </div>
+            <input
+              value={branchNoteInput}
+              onChange={(e) => setBranchNoteInput(e.target.value)}
+              placeholder="Where does this shortcut lead?"
+              className="mb-4 w-full rounded-xl border border-white/10 bg-slate-950 px-3.5 py-2.5 text-sm text-slate-100 outline-none focus:border-amber-400"
+            />
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={() => setIsBranchModalOpen(false)}
+                className="flex-1 rounded-xl border border-white/10 bg-slate-950 py-3 text-xs font-semibold text-slate-200"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={isSavingBranch}
+                onClick={handleConfirmFlagBranch}
+                className="flex-[2] rounded-xl bg-emerald-500 py-3 text-xs font-semibold text-slate-950"
+              >
+                {isSavingBranch ? 'Dropping Pin...' : 'Drop Shortcut Pin'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Live Camera Viewfinder Modal */}
+      {isCameraOpen && (
+        <div role="dialog" aria-modal="true" aria-label="Camera viewfinder" className="fixed inset-0 z-50 flex flex-col bg-black">
+          <video ref={videoRef} autoPlay playsInline muted className="flex-1 object-cover" />
+          <div className="flex items-center justify-between gap-3 bg-slate-950 px-4 py-5 pb-[max(1.25rem,env(safe-area-inset-bottom))]">
+            <button
+              type="button"
+              onClick={() => {
+                stopCameraStream();
+                frozenTelemetryRef.current = null;
+                setFrozenHeading(null);
+              }}
+              className="rounded-xl border border-white/10 bg-slate-900 px-4 py-3 text-xs font-semibold text-slate-200"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={handleCaptureVideoFrame}
+              className="flex-1 rounded-2xl bg-emerald-500 py-3.5 text-sm font-semibold text-slate-950 transition-transform duration-150 ease-out active:scale-95"
+            >
+              Capture Photo
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                stopCameraStream();
+                fileInputRef.current?.click();
+              }}
+              className="rounded-xl border border-white/10 bg-slate-900 px-3.5 py-3 text-xs font-semibold text-slate-200"
+            >
+              Upload File
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Tag Captured Photo Modal */}
       {pendingBlob && (
-        <div className="fixed inset-0 z-50 flex items-end bg-black/60">
-          <div className="w-full rounded-t-3xl bg-slate-900 p-4 pb-6">
-            <h3 className="mb-3 text-base font-bold">
-              Tag Photo ({frozenHeading ?? '--'}°)
-            </h3>
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="tag-photo-title"
+          className="fixed inset-0 z-50 flex items-end justify-center bg-black/65"
+        >
+          <div className="w-full max-w-lg rounded-t-3xl border-t border-white/10 bg-slate-900 p-5 pb-[max(1.5rem,env(safe-area-inset-bottom))]">
+            <div className="mb-3 flex items-center justify-between">
+              <h2 id="tag-photo-title" className="text-base font-semibold text-balance">
+                Tag photo pin
+              </h2>
+              <span className="rounded-lg border border-white/10 bg-slate-950 px-2 py-0.5 text-xs font-medium text-slate-300 tabular-nums">
+                Heading: {frozenHeading ?? '--'}°
+              </span>
+            </div>
             {previewUrl && (
               // eslint-disable-next-line @next/next/no-img-element
-              <img src={previewUrl} alt="Captured preview" className="mb-3 h-28 w-full rounded-xl object-cover" />
+              <img src={previewUrl} alt="Captured preview" className="mb-3 h-32 w-full rounded-2xl object-cover" />
             )}
             <div className="mb-3 grid grid-cols-2 gap-2">
               {PHOTO_CATEGORIES.map((cat) => (
                 <button
+                  type="button"
                   key={cat}
                   onClick={() => setPhotoCategory(cat)}
-                  className={`rounded-xl px-3 py-2.5 text-xs font-semibold ${
-                    photoCategory === cat ? 'bg-sky-600 text-white' : 'bg-slate-800 text-slate-300'
+                  className={`rounded-xl border px-3 py-2 text-xs font-medium ${
+                    photoCategory === cat
+                      ? 'border-emerald-500/50 bg-emerald-950/50 text-emerald-200'
+                      : 'border-white/10 bg-slate-950 text-slate-300'
                   }`}
                 >
                   {cat}
                 </button>
               ))}
             </div>
-            {photoCategory === 'Building Entrance' && (
-              <div className="mb-2 flex flex-wrap gap-1.5">
-                {QUICK_BUILDINGS.map((b) => (
-                  <button
-                    key={b}
-                    onClick={() => setPhotoLabel(b)}
-                    className="rounded-lg bg-slate-800 px-2.5 py-1 text-xs text-slate-300"
-                  >
-                    + {b}
-                  </button>
-                ))}
-              </div>
-            )}
+            <div className="mb-2.5 flex flex-wrap gap-1.5">
+              {QUICK_BUILDINGS.map((b) => (
+                <button
+                  type="button"
+                  key={b}
+                  onClick={() => setPhotoLabel(b)}
+                  className="rounded-lg border border-white/10 bg-slate-950 px-2.5 py-1 text-xs text-slate-300 hover:bg-slate-800"
+                >
+                  + {b}
+                </button>
+              ))}
+            </div>
             <input
               value={photoLabel}
               onChange={(e) => setPhotoLabel(e.target.value)}
-              placeholder="Building / Turn label..."
-              className="mb-4 w-full rounded-xl bg-slate-800 px-3 py-3 text-sm outline-none ring-1 ring-slate-700"
+              placeholder="Building name or turn label (optional for 50m road views)"
+              className="mb-4 w-full rounded-xl border border-white/10 bg-slate-950 px-3.5 py-2.5 text-sm text-slate-100 outline-none focus:border-emerald-500"
             />
             <div className="flex gap-2">
               <button
+                type="button"
                 onClick={() => {
                   setPendingBlob(null);
                   frozenTelemetryRef.current = null;
@@ -894,14 +1428,15 @@ function MapperScreen() {
                     return null;
                   });
                 }}
-                className="flex-1 rounded-xl bg-slate-800 py-3 text-sm font-bold"
+                className="flex-1 rounded-xl border border-white/10 bg-slate-950 py-3 text-xs font-semibold text-slate-200"
               >
                 Cancel
               </button>
               <button
+                type="button"
                 disabled={isSavingPhoto}
                 onClick={handleSavePhotoPin}
-                className="flex-[2] rounded-xl bg-emerald-600 py-3 text-sm font-bold"
+                className="flex-[2] rounded-xl bg-emerald-500 py-3 text-xs font-semibold text-slate-950"
               >
                 {isSavingPhoto ? 'Saving...' : 'Save Pin'}
               </button>
@@ -910,54 +1445,223 @@ function MapperScreen() {
         </div>
       )}
 
+      {/* Inspect / Claim Shortcut Junction Pin Modal */}
       {selectedPin && (
-        <div className="fixed inset-0 z-50 flex items-end bg-black/50" onClick={() => setSelectedPin(null)}>
-          <div className="w-full rounded-t-3xl bg-slate-900 p-4 pb-6" onClick={(e) => e.stopPropagation()}>
-            <p className="text-sm font-bold">Flagged by {selectedPin.created_by}</p>
-            <p className="mb-4 text-xs text-slate-400">
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="Shortcut pin details"
+          className="fixed inset-0 z-50 flex items-end justify-center bg-black/60"
+          onClick={() => setSelectedPin(null)}
+        >
+          <div
+            className="w-full max-w-lg rounded-t-3xl border-t border-white/10 bg-slate-900 p-5 pb-[max(1.5rem,env(safe-area-inset-bottom))]"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="mb-1 flex items-center justify-between gap-2">
+              <h2 className="text-base font-semibold text-balance">{selectedPin.note || 'Flagged shortcut'}</h2>
+              {confirmDeleteId === selectedPin.id ? (
+                <button
+                  type="button"
+                  onClick={() => handleDeleteJunctionPin(selectedPin.id)}
+                  className="rounded-lg bg-rose-600 px-2.5 py-1 text-xs font-semibold text-white"
+                >
+                  Confirm Delete
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => setConfirmDeleteId(selectedPin.id)}
+                  className="rounded-lg border border-rose-500/30 bg-rose-950/50 px-2.5 py-1 text-xs font-medium text-rose-300"
+                >
+                  Delete
+                </button>
+              )}
+            </div>
+            <p className="mb-4 text-xs text-slate-400 tabular-nums">
+              Flagged by {selectedPin.created_by} (
               {userCoord
                 ? `${Math.round(haversineMeters(userCoord, [selectedPin.lng, selectedPin.lat]))}m away`
-                : 'Distance unknown'}{' '}
-              • Status: {selectedPin.status}
+                : 'distance unknown'}
+              , status: {selectedPin.status})
             </p>
             <div className="flex gap-2">
               <button
+                type="button"
                 onClick={() => handleClaimPin(selectedPin)}
-                className="flex-1 rounded-xl bg-amber-500 py-3 text-sm font-bold text-slate-950"
+                className="flex-1 rounded-xl border border-white/10 bg-slate-950 py-3 text-xs font-semibold text-slate-100"
               >
-                Claim & Guide Me
+                Claim & Guide
               </button>
               <button
+                type="button"
+                onClick={() => {
+                  setSelectedPin(null);
+                  handleStartPath([selectedPin.lng, selectedPin.lat]);
+                }}
+                className="flex-1 rounded-xl bg-emerald-500 py-3 text-xs font-semibold text-slate-950"
+              >
+                Start Path Here
+              </button>
+              <button
+                type="button"
                 onClick={() => {
                   navigator.clipboard?.writeText(
                     `${window.location.origin}/mapper?pinId=${selectedPin.id}&lat=${selectedPin.lat}&lng=${selectedPin.lng}`
                   );
                   setSelectedPin(null);
+                  showToast('Link copied');
                 }}
-                className="flex-1 rounded-xl bg-slate-800 py-3 text-sm font-bold"
+                className="rounded-xl border border-white/10 bg-slate-950 px-3.5 py-3 text-xs font-semibold text-slate-300"
               >
-                Copy Link
+                Share
               </button>
             </div>
           </div>
         </div>
       )}
 
-      {arrivedPin && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-5">
-          <div className="w-full max-w-sm rounded-3xl bg-slate-900 p-5 text-center">
-            <p className="mb-1 text-base font-bold text-emerald-400">Arrived at Shortcut!</p>
-            <p className="mb-4 text-xs text-slate-300">Start recording from this exact junction?</p>
+      {/* Inspect Photo Pin Modal */}
+      {selectedPhotoPin && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="Photo pin details"
+          className="fixed inset-0 z-50 flex items-end justify-center bg-black/60"
+          onClick={() => setSelectedPhotoPin(null)}
+        >
+          <div
+            className="w-full max-w-lg rounded-t-3xl border-t border-white/10 bg-slate-900 p-5 pb-[max(1.5rem,env(safe-area-inset-bottom))]"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="mb-3 flex items-start justify-between gap-2">
+              <div>
+                <span className="rounded-md border border-white/10 bg-slate-950 px-2 py-0.5 text-[11px] font-medium text-sky-300">
+                  {selectedPhotoPin.category}
+                </span>
+                <h2 className="mt-1 text-base font-semibold text-balance">
+                  {selectedPhotoPin.label || 'Road view photo'}
+                </h2>
+                <p className="text-xs text-slate-400 tabular-nums">
+                  {selectedPhotoPin.scout_name ? `Mapped by ${selectedPhotoPin.scout_name}, ` : ''}
+                  heading {selectedPhotoPin.heading ?? '--'}°
+                </p>
+              </div>
+              {confirmDeleteId === selectedPhotoPin.id ? (
+                <button
+                  type="button"
+                  onClick={() => handleDeletePhotoPin(selectedPhotoPin.id)}
+                  className="rounded-xl bg-rose-600 px-3 py-1.5 text-xs font-semibold text-white"
+                >
+                  Confirm Delete
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => setConfirmDeleteId(selectedPhotoPin.id)}
+                  className="rounded-xl border border-rose-500/30 bg-rose-950/50 px-3 py-1.5 text-xs font-medium text-rose-300"
+                >
+                  Delete Pin
+                </button>
+              )}
+            </div>
+            {selectedPhotoPin.image_url && (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                src={selectedPhotoPin.image_url}
+                alt={selectedPhotoPin.label ?? 'Campus pin'}
+                className="mb-3 h-44 w-full rounded-2xl object-cover"
+              />
+            )}
             <button
+              type="button"
+              onClick={() => setSelectedPhotoPin(null)}
+              className="w-full rounded-xl border border-white/10 bg-slate-950 py-2.5 text-xs font-semibold text-slate-200"
+            >
+              Close
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Inspect Mapped Path Modal */}
+      {selectedPath && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="Mapped path details"
+          className="fixed inset-0 z-50 flex items-end justify-center bg-black/60"
+          onClick={() => setSelectedPath(null)}
+        >
+          <div
+            className="w-full max-w-lg rounded-t-3xl border-t border-white/10 bg-slate-900 p-5 pb-[max(1.5rem,env(safe-area-inset-bottom))]"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="mb-4 flex items-start justify-between gap-2">
+              <div>
+                <span className="rounded-md border border-white/10 bg-slate-950 px-2 py-0.5 text-[11px] font-medium text-sky-300 tabular-nums">
+                  {selectedPath.distance_m}m route
+                </span>
+                <h2 className="mt-1 text-base font-semibold text-balance">
+                  {selectedPath.name || 'Campus footpath'}
+                </h2>
+                <p className="text-xs text-slate-400 tabular-nums">
+                  Mapped by {selectedPath.scout_name} in {selectedPath.zone.split(':')[0]} ({selectedPath.coordinates.length} points)
+                </p>
+              </div>
+              {confirmDeleteId === selectedPath.id ? (
+                <button
+                  type="button"
+                  onClick={() => handleDeletePath(selectedPath.id)}
+                  className="rounded-xl bg-rose-600 px-3 py-1.5 text-xs font-semibold text-white"
+                >
+                  Confirm Delete
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => setConfirmDeleteId(selectedPath.id)}
+                  className="rounded-xl border border-rose-500/30 bg-rose-950/50 px-3 py-1.5 text-xs font-medium text-rose-300"
+                >
+                  Delete Path
+                </button>
+              )}
+            </div>
+            <button
+              type="button"
+              onClick={() => setSelectedPath(null)}
+              className="w-full rounded-xl border border-white/10 bg-slate-950 py-2.5 text-xs font-semibold text-slate-200"
+            >
+              Close
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Auto-Arrival Trigger Modal */}
+      {arrivedPin && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="Arrived at shortcut"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-5"
+        >
+          <div className="w-full max-w-sm rounded-3xl border border-white/10 bg-slate-900 p-5 text-center shadow-xl">
+            <h2 className="mb-1 text-base font-semibold text-balance text-emerald-400">Arrived at shortcut</h2>
+            <p className="mb-4 text-xs text-pretty text-slate-300">
+              {arrivedPin.note ? `"${arrivedPin.note}" — ` : ''}Start recording from this exact junction?
+            </p>
+            <button
+              type="button"
               onClick={async () => {
                 const pin = arrivedPin;
                 setArrivedPin(null);
                 await supabase.from('junction_pins').update({ status: 'done' }).eq('id', pin.id);
                 handleStartPath([pin.lng, pin.lat]);
               }}
-              className="w-full rounded-2xl bg-emerald-600 py-3 text-sm font-bold"
+              className="w-full rounded-2xl bg-emerald-500 py-3 text-sm font-semibold text-slate-950"
             >
-              Start Recording Here
+              Start Path Here
             </button>
           </div>
         </div>
@@ -968,10 +1672,39 @@ function MapperScreen() {
 
 export default function MapperPage() {
   return (
-    <Suspense fallback={<div className="flex h-[100dvh] items-center justify-center bg-slate-950 text-white">Loading Mapper...</div>}>
+    <Suspense fallback={<div className="flex h-dvh items-center justify-center bg-slate-950 text-sm text-slate-300">Loading Mapper...</div>}>
       <MapperScreen />
     </Suspense>
   );
+}
+
+async function savePathRpc(payload: Extract<QueuedItem, { type: 'path' }>['payload']) {
+  const { error } = await supabase.rpc('save_path_with_split', {
+    p_scout_name: payload.scout_name,
+    p_zone: payload.zone,
+    p_coordinates: payload.coordinates,
+    p_distance_m: payload.distance_m,
+    p_split_path_id: payload.split_path_id ?? null,
+    p_split_segment_idx: payload.split_segment_idx ?? null,
+    p_split_coord: payload.split_coord ?? null,
+    p_end_split_path_id: payload.end_split_path_id ?? null,
+    p_end_split_segment_idx: payload.end_split_segment_idx ?? null,
+    p_end_split_coord: payload.end_split_coord ?? null,
+    p_name: payload.name ?? null,
+  });
+  if (!error) return;
+
+  // Fallback to 7-arg RPC if database function hasn't been updated with new columns yet
+  const { error: fallbackErr } = await supabase.rpc('save_path_with_split', {
+    p_scout_name: payload.scout_name,
+    p_zone: payload.zone,
+    p_coordinates: payload.coordinates,
+    p_distance_m: payload.distance_m,
+    p_split_path_id: payload.split_path_id ?? null,
+    p_split_segment_idx: payload.split_segment_idx ?? null,
+    p_split_coord: payload.split_coord ?? null,
+  });
+  if (fallbackErr) throw fallbackErr;
 }
 
 async function uploadPhotoRecord(
@@ -996,16 +1729,7 @@ async function uploadPhotoRecord(
 
 async function processQueuedItem(item: QueuedItem) {
   if (item.type === 'path') {
-    const { error } = await supabase.rpc('save_path_with_split', {
-      p_scout_name: item.payload.scout_name,
-      p_zone: item.payload.zone,
-      p_coordinates: item.payload.coordinates,
-      p_distance_m: item.payload.distance_m,
-      p_split_path_id: item.payload.split_path_id ?? null,
-      p_split_segment_idx: item.payload.split_segment_idx ?? null,
-      p_split_coord: item.payload.split_coord ?? null,
-    });
-    if (error) throw error;
+    await savePathRpc(item.payload);
   } else if (item.type === 'pin') {
     const { error } = await supabase.from('junction_pins').insert(item.payload);
     if (error) throw error;
