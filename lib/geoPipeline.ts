@@ -143,3 +143,93 @@ export function suggestTurnLabel(recentPath: Coord[]): string {
   if (delta < -25) return 'Left Turn';
   return 'Junction';
 }
+
+export interface FrontierEndpoint {
+  id: string;
+  pathId: string;
+  coord: Coord;
+  which: 'start' | 'end';
+}
+
+export function findFrontierEndpoints(
+  paths: ExistingPath[],
+  connectToleranceMeters = 6
+): FrontierEndpoint[] {
+  const validPaths = paths.filter((p) => p.coordinates.length >= 2);
+  const lines = validPaths.map((p) => ({
+    id: p.id,
+    coords: p.coordinates,
+    line: turf.lineString(p.coordinates),
+  }));
+
+  const frontiers: FrontierEndpoint[] = [];
+
+  for (const item of lines) {
+    const endpoints: { coord: Coord; which: 'start' | 'end' }[] = [
+      { coord: item.coords[0], which: 'start' },
+      { coord: item.coords[item.coords.length - 1], which: 'end' },
+    ];
+
+    for (const ep of endpoints) {
+      const pt = turf.point(ep.coord);
+      let connected = false;
+
+      for (const other of lines) {
+        if (other.id === item.id) continue;
+        const nearest = turf.nearestPointOnLine(other.line, pt, { units: 'meters' });
+        if ((nearest.properties.dist ?? Infinity) <= connectToleranceMeters) {
+          connected = true;
+          break;
+        }
+      }
+
+      if (!connected) {
+        frontiers.push({
+          id: `${item.id}-${ep.which}`,
+          pathId: item.id,
+          coord: ep.coord,
+          which: ep.which,
+        });
+      }
+    }
+  }
+
+  return frontiers;
+}
+
+export function isPointNearExistingPaths(
+  coord: Coord,
+  paths: ExistingPath[],
+  thresholdMeters = 5
+): { near: boolean; pathId?: string; distanceMeters: number } {
+  const pt = turf.point(coord);
+  let bestDist = Infinity;
+  let bestPathId: string | undefined;
+
+  for (const p of paths) {
+    if (p.coordinates.length < 2) continue;
+    const nearest = turf.nearestPointOnLine(turf.lineString(p.coordinates), pt, { units: 'meters' });
+    const d = nearest.properties.dist ?? Infinity;
+    if (d < bestDist) {
+      bestDist = d;
+      bestPathId = p.id;
+    }
+  }
+
+  return { near: bestDist <= thresholdMeters, pathId: bestPathId, distanceMeters: bestDist };
+}
+
+export function computePathOverlapRatio(
+  activePath: Coord[],
+  paths: ExistingPath[],
+  thresholdMeters = 5
+): number {
+  if (activePath.length < 2 || paths.length === 0) return 0;
+  let nearCount = 0;
+  for (const pt of activePath) {
+    if (isPointNearExistingPaths(pt, paths, thresholdMeters).near) {
+      nearCount++;
+    }
+  }
+  return nearCount / activePath.length;
+}
