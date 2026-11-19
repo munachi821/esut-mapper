@@ -582,16 +582,16 @@ export default function MapperMap({
       <div
         role="toolbar"
         aria-label="Map view controls"
-        className="absolute right-3 top-20 z-10 flex flex-col gap-1 rounded-2xl border border-white/10 bg-slate-950/90 p-1 shadow-lg backdrop-blur-md"
+        className="absolute right-3 top-20 z-10 flex flex-col gap-1 rounded-2xl border border-slate-200/90 bg-white/95 p-1 shadow-lg backdrop-blur-md"
       >
         <button
           type="button"
           onClick={toggleBaseMap}
           aria-label={isSatellite ? "Switch to street map" : "Switch to satellite imagery"}
-          className="flex items-center gap-2 rounded-xl px-2.5 py-2 text-xs font-medium text-slate-100 transition-transform duration-150 ease-out hover:bg-slate-900 active:scale-95"
+          className="flex items-center gap-2 rounded-xl px-2.5 py-2 text-xs font-semibold text-slate-800 transition-transform duration-150 ease-out hover:bg-slate-100 active:scale-95"
         >
           <svg
-            className="size-4 text-sky-400"
+            className="size-4 text-sky-600"
             viewBox="0 0 24 24"
             fill="none"
             stroke="currentColor"
@@ -603,17 +603,17 @@ export default function MapperMap({
           </svg>
           <span>{isSatellite ? "Streets" : "Satellite"}</span>
         </button>
-        <div className="h-px bg-white/10" />
+        <div className="h-px bg-slate-200" />
         <button
           type="button"
           onClick={() =>
             mapRef.current?.flyTo({ center: ESUT_CENTER, zoom: 16.5, pitch: 0 })
           }
           aria-label="Center map on ESUT Agbani"
-          className="flex items-center gap-2 rounded-xl px-2.5 py-2 text-xs font-medium text-slate-200 transition-transform duration-150 ease-out hover:bg-slate-900 active:scale-95"
+          className="flex items-center gap-2 rounded-xl px-2.5 py-2 text-xs font-semibold text-slate-700 transition-transform duration-150 ease-out hover:bg-slate-100 active:scale-95"
         >
           <svg
-            className="size-4 text-slate-400"
+            className="size-4 text-slate-600"
             viewBox="0 0 24 24"
             fill="none"
             stroke="currentColor"
@@ -626,17 +626,17 @@ export default function MapperMap({
         </button>
         {userCoord && (
           <>
-            <div className="h-px bg-white/10" />
+            <div className="h-px bg-slate-200" />
             <button
               type="button"
               onClick={() =>
                 mapRef.current?.flyTo({ center: userCoord, zoom: 17.5 })
               }
               aria-label="Center map on my GPS position"
-              className="flex items-center gap-2 rounded-xl px-2.5 py-2 text-xs font-medium text-slate-200 transition-transform duration-150 ease-out hover:bg-slate-900 active:scale-95"
+              className="flex items-center gap-2 rounded-xl px-2.5 py-2 text-xs font-semibold text-slate-700 transition-transform duration-150 ease-out hover:bg-slate-100 active:scale-95"
             >
               <svg
-                className="size-4 text-sky-400"
+                className="size-4 text-sky-600"
                 viewBox="0 0 24 24"
                 fill="none"
                 stroke="currentColor"
