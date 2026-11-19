@@ -328,7 +328,7 @@ function MapperScreen() {
       setAccuracy(acc);
 
       const nowMs = Date.now();
-      if (scoutName && scoutZone && nowMs - lastPresenceTsRef.current >= 2000) {
+      if (!simModeRef.current && scoutName && scoutZone && nowMs - lastPresenceTsRef.current >= 2000) {
         lastPresenceTsRef.current = nowMs;
         channelRef.current?.track({ name: scoutName, zone: scoutZone, lng: coord[0], lat: coord[1] });
       }
@@ -386,9 +386,12 @@ function MapperScreen() {
     if (next) {
       setFocusCoord(ESUT_CENTER);
       ingestGpsTick(ESUT_CENTER, 4, Date.now(), profile?.name, profile?.zone);
-      showToast('Simulation active: tap map to step along roads');
+      showToast('Simulation active: tap map to step along roads (local only)');
     } else {
-      showToast('Switched to live device GPS');
+      setPaths((prev) => prev.filter((p) => !p.id.startsWith('sim-')));
+      setJunctionPins((prev) => prev.filter((p) => !p.id.startsWith('sim-')));
+      setPhotoPins((prev) => prev.filter((p) => !p.id.startsWith('sim-')));
+      showToast('Switched to live device GPS (cleared sim items)');
     }
   };
 
@@ -520,8 +523,23 @@ function MapperScreen() {
     };
 
     try {
-      await savePathRpc(payload);
-      showToast(`Path saved (${payload.distance_m}m)`);
+      if (simModeRef.current) {
+        setPaths((prev) => [
+          ...prev,
+          {
+            id: `sim-${crypto.randomUUID()}`,
+            scout_name: payload.scout_name,
+            zone: payload.zone,
+            name: payload.name ?? null,
+            coordinates: payload.coordinates,
+            distance_m: payload.distance_m,
+          },
+        ]);
+        showToast(`Sim path previewed (${payload.distance_m}m — not saved to DB)`);
+      } else {
+        await savePathRpc(payload);
+        showToast(`Path saved (${payload.distance_m}m)`);
+      }
     } catch {
       await enqueueOffline({ id: crypto.randomUUID(), type: 'path', createdAt: Date.now(), payload });
       setQueueCount((c) => c + 1);
@@ -663,8 +681,27 @@ function MapperScreen() {
     };
 
     try {
-      await uploadPhotoRecord(pendingBlob, payload);
-      showToast('Photo pin saved');
+      if (simModeRef.current) {
+        const simUrl = URL.createObjectURL(pendingBlob);
+        setPhotoPins((prev) => [
+          ...prev,
+          {
+            id: `sim-${crypto.randomUUID()}`,
+            lat: payload.lat,
+            lng: payload.lng,
+            category: payload.category,
+            label: payload.label || null,
+            heading: payload.heading,
+            image_url: simUrl,
+            scout_name: payload.scout_name,
+            zone: payload.zone,
+          },
+        ]);
+        showToast('Sim photo pin previewed (not saved to DB)');
+      } else {
+        await uploadPhotoRecord(pendingBlob, payload);
+        showToast('Photo pin saved');
+      }
     } catch {
       await enqueueOffline({ id: crypto.randomUUID(), type: 'photo', createdAt: Date.now(), blob: pendingBlob, payload });
       setQueueCount((c) => c + 1);
@@ -710,12 +747,28 @@ function MapperScreen() {
       note: branchNoteInput.trim() || 'Shortcut',
     };
     try {
-      const { data, error } = await supabase.from('junction_pins').insert(payload).select().single();
-      if (error) throw error;
-      if (data) {
-        const link = `${window.location.origin}/mapper?pinId=${data.id}&lat=${data.lat}&lng=${data.lng}`;
-        navigator.clipboard?.writeText(link).catch(() => {});
-        showToast('Shortcut pin dropped and link copied');
+      if (simModeRef.current) {
+        setJunctionPins((prev) => [
+          ...prev,
+          {
+            id: `sim-${crypto.randomUUID()}`,
+            lat: payload.lat,
+            lng: payload.lng,
+            status: 'open',
+            created_by: payload.created_by,
+            claimed_by: null,
+            note: payload.note,
+          },
+        ]);
+        showToast('Sim shortcut pin previewed (not saved to DB)');
+      } else {
+        const { data, error } = await supabase.from('junction_pins').insert(payload).select().single();
+        if (error) throw error;
+        if (data) {
+          const link = `${window.location.origin}/mapper?pinId=${data.id}&lat=${data.lat}&lng=${data.lng}`;
+          navigator.clipboard?.writeText(link).catch(() => {});
+          showToast('Shortcut pin dropped and link copied');
+        }
       }
     } catch {
       await enqueueOffline({ id: crypto.randomUUID(), type: 'pin', createdAt: Date.now(), payload });
@@ -730,14 +783,22 @@ function MapperScreen() {
 
   const handleClaimPin = async (pin: MapJunctionPin) => {
     if (!profile) return;
-    await supabase.from('junction_pins').update({ status: 'claimed', claimed_by: profile.name }).eq('id', pin.id);
+    if (simModeRef.current || pin.id.startsWith('sim-')) {
+      setJunctionPins((prev) =>
+        prev.map((p) => (p.id === pin.id ? { ...p, status: 'claimed', claimed_by: profile.name } : p))
+      );
+    } else {
+      await supabase.from('junction_pins').update({ status: 'claimed', claimed_by: profile.name }).eq('id', pin.id);
+    }
     setGuidePin(pin);
     setSelectedPin(null);
     showToast('Shortcut claimed — follow the dashed guide line');
   };
 
   const handleDeleteJunctionPin = async (id: string) => {
-    await supabase.from('junction_pins').delete().eq('id', id);
+    if (!id.startsWith('sim-')) {
+      await supabase.from('junction_pins').delete().eq('id', id);
+    }
     setJunctionPins((prev) => prev.filter((p) => p.id !== id));
     setSelectedPin(null);
     setConfirmDeleteId(null);
@@ -745,7 +806,9 @@ function MapperScreen() {
   };
 
   const handleDeletePhotoPin = async (id: string) => {
-    await supabase.from('pins').delete().eq('id', id);
+    if (!id.startsWith('sim-')) {
+      await supabase.from('pins').delete().eq('id', id);
+    }
     setPhotoPins((prev) => prev.filter((p) => p.id !== id));
     setSelectedPhotoPin(null);
     setConfirmDeleteId(null);
@@ -753,7 +816,9 @@ function MapperScreen() {
   };
 
   const handleDeletePath = async (id: string) => {
-    await supabase.from('paths').delete().eq('id', id);
+    if (!id.startsWith('sim-')) {
+      await supabase.from('paths').delete().eq('id', id);
+    }
     setPaths((prev) => prev.filter((p) => p.id !== id));
     setSelectedPath(null);
     setConfirmDeleteId(null);
@@ -1656,7 +1721,11 @@ function MapperScreen() {
               onClick={async () => {
                 const pin = arrivedPin;
                 setArrivedPin(null);
-                await supabase.from('junction_pins').update({ status: 'done' }).eq('id', pin.id);
+                if (simModeRef.current || pin.id.startsWith('sim-')) {
+                  setJunctionPins((prev) => prev.map((p) => (p.id === pin.id ? { ...p, status: 'done' } : p)));
+                } else {
+                  await supabase.from('junction_pins').update({ status: 'done' }).eq('id', pin.id);
+                }
                 handleStartPath([pin.lng, pin.lat]);
               }}
               className="w-full rounded-2xl bg-emerald-500 py-3 text-sm font-semibold text-slate-950"
