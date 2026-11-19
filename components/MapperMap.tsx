@@ -71,6 +71,7 @@ export interface MapPhotoPin {
 interface MapperMapProps {
   paths: { id: string; name?: string | null; coordinates: Coord[] }[];
   activePath: Coord[];
+  frontierEndpoints?: { id: string; pathId: string; coord: Coord; which: "start" | "end" }[];
   junctionPins: MapJunctionPin[];
   photoPins: MapPhotoPin[];
   teammates: { name: string; lng: number; lat: number }[];
@@ -82,12 +83,14 @@ interface MapperMapProps {
   onSelectJunctionPin: (pinId: string) => void;
   onSelectPhotoPin?: (pinId: string) => void;
   onSelectPath?: (pathId: string) => void;
+  onSelectFrontier?: (frontierId: string) => void;
   onMapClick?: (coord: Coord) => void;
 }
 
 export default function MapperMap({
   paths,
   activePath,
+  frontierEndpoints = [],
   junctionPins,
   photoPins,
   teammates,
@@ -99,6 +102,7 @@ export default function MapperMap({
   onSelectJunctionPin,
   onSelectPhotoPin,
   onSelectPath,
+  onSelectFrontier,
   onMapClick,
 }: MapperMapProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -108,12 +112,14 @@ export default function MapperMap({
     onSelectJunctionPin,
     onSelectPhotoPin,
     onSelectPath,
+    onSelectFrontier,
     onMapClick,
   });
 
   const latestRef = useRef({
     paths,
     activePath,
+    frontierEndpoints,
     junctionPins,
     photoPins,
     teammates,
@@ -217,6 +223,19 @@ export default function MapperMap({
           ]
         : [],
     });
+
+    (
+      map.getSource("frontier-endpoints") as
+        | maplibregl.GeoJSONSource
+        | undefined
+    )?.setData({
+      type: "FeatureCollection",
+      features: d.frontierEndpoints.map((f) => ({
+        type: "Feature",
+        properties: { id: f.id, pathId: f.pathId },
+        geometry: { type: "Point", coordinates: f.coord },
+      })),
+    });
   };
 
   const ensureLayers = (map: maplibregl.Map) => {
@@ -226,6 +245,7 @@ export default function MapperMap({
     };
     [
       "synced-paths",
+      "frontier-endpoints",
       "active-path",
       "guide-line",
       "junction-pins",
@@ -277,6 +297,20 @@ export default function MapperMap({
           "line-opacity": 0.95,
         },
         layout: { "line-cap": "round", "line-join": "round" },
+      });
+    }
+
+    if (!map.getLayer("frontier-endpoints-layer")) {
+      map.addLayer({
+        id: "frontier-endpoints-layer",
+        type: "circle",
+        source: "frontier-endpoints",
+        paint: {
+          "circle-radius": 6.5,
+          "circle-color": "#082f49",
+          "circle-stroke-width": 3,
+          "circle-stroke-color": "#7dd3fc",
+        },
       });
     }
 
@@ -434,6 +468,14 @@ export default function MapperMap({
         if (id) callbacksRef.current.onSelectPhotoPin?.(id);
         return;
       }
+      const frontierHits = map.queryRenderedFeatures(e.point, {
+        layers: ["frontier-endpoints-layer"],
+      });
+      if (frontierHits.length > 0) {
+        const id = frontierHits[0]?.properties?.id;
+        if (id) callbacksRef.current.onSelectFrontier?.(id);
+        return;
+      }
       const pathHits = map.queryRenderedFeatures(e.point, {
         layers: ["synced-paths-layer", "synced-paths-casing"],
       });
@@ -475,14 +517,22 @@ export default function MapperMap({
       onSelectJunctionPin,
       onSelectPhotoPin,
       onSelectPath,
+      onSelectFrontier,
       onMapClick,
     };
-  }, [onSelectJunctionPin, onSelectPhotoPin, onSelectPath, onMapClick]);
+  }, [
+    onSelectJunctionPin,
+    onSelectPhotoPin,
+    onSelectPath,
+    onSelectFrontier,
+    onMapClick,
+  ]);
 
   useEffect(() => {
     latestRef.current = {
       paths,
       activePath,
+      frontierEndpoints,
       junctionPins,
       photoPins,
       teammates,
@@ -494,6 +544,7 @@ export default function MapperMap({
   }, [
     paths,
     activePath,
+    frontierEndpoints,
     junctionPins,
     photoPins,
     teammates,
