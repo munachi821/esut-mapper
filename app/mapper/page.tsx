@@ -118,15 +118,23 @@ const getProfileSnapshot = () => {
 };
 
 const getProfileServerSnapshot = () => null;
+const subscribeNoop = () => () => {};
+const getIsLocalhost = () =>
+  typeof window !== 'undefined' &&
+  (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
+const getIsLocalhostServer = () => false;
 
 function MapperScreen() {
   const searchParams = useSearchParams();
+  const isLocalhost = useSyncExternalStore(subscribeNoop, getIsLocalhost, getIsLocalhostServer);
+  const showSimButton = isLocalhost || searchParams.get('sim') === '1';
 
   const profile = useSyncExternalStore(subscribeProfile, getProfileSnapshot, getProfileServerSnapshot);
   const [nameInput, setNameInput] = useState('');
   const [zoneInput, setZoneInput] = useState(ZONES[1]);
   const [sessionReady, setSessionReady] = useState(false);
   const [isZonePickerOpen, setIsZonePickerOpen] = useState(false);
+  const [isHelpOpen, setIsHelpOpen] = useState(false);
   const [toastMsg, setToastMsg] = useState<string | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
 
@@ -417,7 +425,7 @@ function MapperScreen() {
           incoming: coord,
           accuracy: acc,
           timestamp,
-          lastTimestamp: lastTickTsRef.current,
+          lastTimestamp: simModeRef.current ? null : lastTickTsRef.current,
           activePath: activePathRef.current,
         });
 
@@ -462,10 +470,61 @@ function MapperScreen() {
       ingestGpsTick(ESUT_CENTER, 4, Date.now(), profile?.name, profile?.zone);
       showToast('Simulation active: tap map to step along roads (local only)');
     } else {
+      // Wipe all simulated data, active walk state, fake GPS, and open sim modals
       setPaths((prev) => prev.filter((p) => !p.id.startsWith('sim-')));
       setJunctionPins((prev) => prev.filter((p) => !p.id.startsWith('sim-')));
-      setPhotoPins((prev) => prev.filter((p) => !p.id.startsWith('sim-')));
-      showToast('Switched to live device GPS (cleared sim items)');
+      setPhotoPins((prev) => {
+        prev.forEach((p) => {
+          if (p.id.startsWith('sim-') && p.image_url.startsWith('blob:')) {
+            URL.revokeObjectURL(p.image_url);
+          }
+        });
+        return prev.filter((p) => !p.id.startsWith('sim-'));
+      });
+
+      recStateRef.current = 'IDLE';
+      setRecState('IDLE');
+      activePathRef.current = [];
+      setActivePath([]);
+      setPathDistance(0);
+      lastTickTsRef.current = null;
+      startSnapMetaRef.current = {};
+      anchorCoordRef.current = null;
+      alertFiredRef.current = false;
+      overlapStreakRef.current = 0;
+      setCadenceMeters(0);
+      setIsSnapDue(false);
+      setIsOverlappingPath(false);
+
+      userCoordRef.current = null;
+      accuracyRef.current = null;
+      setUserCoord(null);
+      setAccuracy(null);
+
+      setGuidePin(null);
+      setGuideFrontier(null);
+      setArrivedPin(null);
+      setArrivedFrontier(null);
+      setSelectedPin(null);
+      setSelectedPhotoPin(null);
+      setSelectedPath(null);
+      setSelectedFrontier(null);
+      setPendingPathSave(null);
+      setPauseJumpPrompt(null);
+      setIsBranchModalOpen(false);
+      setBranchCoord(null);
+      setPendingBlob(null);
+      frozenTelemetryRef.current = null;
+      setFrozenHeading(null);
+      setPreviewUrl((prev) => {
+        if (prev) URL.revokeObjectURL(prev);
+        return null;
+      });
+      arrivedPinIdsRef.current.forEach((id) => {
+        if (id.startsWith('sim-')) arrivedPinIdsRef.current.delete(id);
+      });
+
+      showToast('Switched to live GPS — all simulation state cleared');
     }
   };
 
@@ -550,6 +609,10 @@ function MapperScreen() {
   };
 
   const handleStartPath = (overrideStart?: Coord) => {
+    if (recStateRef.current !== 'IDLE' && activePathRef.current.length >= 2) {
+      showToast('Save or discard your current path before starting a new one');
+      return;
+    }
     const base = overrideStart ?? userCoordRef.current;
     if (!base) {
       showToast('Wait for GPS lock or enable Sim in the top bar');
@@ -889,14 +952,22 @@ function MapperScreen() {
             note: payload.note,
           },
         ]);
-        showToast('Sim shortcut pin previewed (not saved to DB)');
+        showToast(
+          recStateRef.current !== 'IDLE'
+            ? 'Branch pinned — keep walking your current route'
+            : 'Sim shortcut pin previewed (not saved to DB)'
+        );
       } else {
         const { data, error } = await supabase.from('junction_pins').insert(payload).select().single();
         if (error) throw error;
         if (data) {
           const link = `${window.location.origin}/mapper?pinId=${data.id}&lat=${data.lat}&lng=${data.lng}`;
           navigator.clipboard?.writeText(link).catch(() => {});
-          showToast('Shortcut pin dropped and link copied');
+          showToast(
+            recStateRef.current !== 'IDLE'
+              ? 'Branch pinned — keep walking your current route'
+              : 'Shortcut pin dropped and link copied'
+          );
         }
       }
     } catch {
@@ -996,7 +1067,7 @@ function MapperScreen() {
   const cadenceRatio = Math.min(1, cadenceMeters / CADENCE_TARGET_M);
 
   return (
-    <div className="relative h-dvh w-screen overflow-hidden bg-slate-950 text-slate-100 select-none">
+    <div className="relative h-dvh w-screen overflow-hidden bg-slate-100 text-slate-900 select-none">
       {/* Full-bleed Map Canvas */}
       <MapperMap
         paths={paths}
@@ -1045,19 +1116,19 @@ function MapperScreen() {
       />
 
       {/* Top Floating Instrument Bar */}
-      <header className="pointer-events-none absolute inset-x-3 top-3 z-20 mx-auto flex max-w-lg items-center justify-between gap-2 rounded-2xl border border-white/10 bg-slate-950/90 px-3 py-2 shadow-lg backdrop-blur-md">
+      <header className="pointer-events-none absolute inset-x-3 top-3 z-20 mx-auto flex max-w-lg items-center justify-between gap-2 rounded-2xl border border-slate-200/90 bg-white/95 px-3 py-2 shadow-lg backdrop-blur-md">
         <div className="pointer-events-auto flex min-w-0 items-center gap-1.5">
           <button
             type="button"
             onClick={() => setIsZonePickerOpen(true)}
             aria-label="Switch active campus zone"
-            className="flex min-w-0 items-center gap-1.5 rounded-xl border border-white/10 bg-slate-900 px-2.5 py-1.5 text-xs font-medium text-slate-100 transition-transform duration-150 ease-out hover:bg-slate-800 active:scale-95"
+            className="flex min-w-0 items-center gap-1.5 rounded-xl border border-slate-200 bg-slate-100 px-2.5 py-1.5 text-xs font-medium text-slate-900 transition-transform duration-150 ease-out hover:bg-slate-200/70 active:scale-95"
           >
             <span className="size-2 shrink-0 rounded-full bg-sky-400" />
             <span className="truncate">
               {profile?.zone.split(':')[0] ?? 'Zone 1'} / {profile?.name ?? 'Scout'}
             </span>
-            <svg className="size-3.5 shrink-0 text-slate-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <svg className="size-3.5 shrink-0 text-slate-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <polyline points="6 9 12 15 18 9" />
             </svg>
           </button>
@@ -1065,18 +1136,18 @@ function MapperScreen() {
           <span
             className={`flex shrink-0 items-center gap-1.5 rounded-xl border px-2.5 py-1.5 text-xs font-medium tabular-nums ${
               gpsBad
-                ? 'border-rose-500/30 bg-rose-950/60 text-rose-300'
-                : 'border-emerald-500/30 bg-emerald-950/60 text-emerald-300'
+                ? 'border-rose-200 bg-rose-50 text-rose-700'
+                : 'border-emerald-200 bg-emerald-50 text-emerald-700'
             }`}
           >
-            <span className={`size-1.5 rounded-full ${gpsBad ? 'bg-rose-400' : 'bg-emerald-400'}`} />
+            <span className={`size-1.5 rounded-full ${gpsBad ? 'bg-rose-500' : 'bg-emerald-400'}`} />
             {accuracy !== null ? `±${accuracy}m` : 'No GPS'}
           </span>
         </div>
 
         <div className="pointer-events-auto flex shrink-0 items-center gap-1.5">
           {queueCount > 0 && (
-            <span className="rounded-xl border border-amber-500/30 bg-amber-950/60 px-2 py-1.5 text-xs font-medium text-amber-300 tabular-nums">
+            <span className="rounded-xl border border-amber-200 bg-amber-50 px-2 py-1.5 text-xs font-medium text-amber-800 tabular-nums">
               {queueCount} queued
             </span>
           )}
@@ -1087,7 +1158,7 @@ function MapperScreen() {
                 <span
                   key={t.name}
                   title={t.name}
-                  className="flex size-6 items-center justify-center rounded-full border border-slate-950 bg-slate-800 text-[10px] font-semibold text-slate-200"
+                  className="flex size-6 items-center justify-center rounded-full border border-white bg-slate-200 text-[10px] font-semibold text-slate-800"
                 >
                   {t.name[0]}
                 </span>
@@ -1095,26 +1166,37 @@ function MapperScreen() {
             </div>
           )}
 
+          {showSimButton && (
+            <button
+              type="button"
+              onClick={toggleSimMode}
+              aria-pressed={simMode}
+              className={`rounded-xl border px-2.5 py-1.5 text-xs font-medium transition-transform duration-150 ease-out active:scale-95 ${
+                simMode
+                  ? 'border-emerald-300 bg-emerald-50 text-emerald-700'
+                  : 'border-slate-200 bg-slate-100 text-slate-700 hover:bg-slate-200/70'
+              }`}
+            >
+              {simMode ? 'Sim: On' : 'Sim'}
+            </button>
+          )}
+
           <button
             type="button"
-            onClick={toggleSimMode}
-            aria-pressed={simMode}
-            className={`rounded-xl border px-2.5 py-1.5 text-xs font-medium transition-transform duration-150 ease-out active:scale-95 ${
-              simMode
-                ? 'border-emerald-500/40 bg-emerald-950/70 text-emerald-300'
-                : 'border-white/10 bg-slate-900 text-slate-300 hover:bg-slate-800'
-            }`}
+            onClick={() => setIsHelpOpen(true)}
+            aria-label="Open map legend and quick guide"
+            className="flex size-8 items-center justify-center rounded-xl border border-slate-200 bg-slate-100 text-xs font-semibold text-slate-800 transition-transform duration-150 ease-out hover:bg-slate-200/70 active:scale-95"
           >
-            {simMode ? 'Sim: On' : 'Sim'}
+            ?
           </button>
 
           <button
             type="button"
             onClick={handleExportGeoJSON}
             aria-label="Export mapped data as GeoJSON"
-            className="flex size-8 items-center justify-center rounded-xl border border-white/10 bg-slate-900 text-slate-200 transition-transform duration-150 ease-out hover:bg-slate-800 active:scale-95"
+            className="flex size-8 items-center justify-center rounded-xl border border-slate-200 bg-slate-100 text-slate-800 transition-transform duration-150 ease-out hover:bg-slate-200/70 active:scale-95"
           >
-            <svg className="size-4 text-slate-300" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <svg className="size-4 text-slate-700" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
               <polyline points="7 10 12 15 17 10" />
               <line x1="12" y1="15" x2="12" y2="3" />
@@ -1126,7 +1208,7 @@ function MapperScreen() {
       {/* Non-blocking Status Banner */}
       {toastMsg && (
         <div role="status" aria-live="polite" className="pointer-events-none absolute inset-x-0 top-20 z-30 flex justify-center px-4">
-          <div className="rounded-xl border border-white/15 bg-slate-900/95 px-3.5 py-2 text-xs font-medium text-slate-100 shadow-lg">
+          <div className="rounded-xl bg-slate-900 px-3.5 py-2 text-xs font-medium text-white shadow-lg">
             {toastMsg}
           </div>
         </div>
@@ -1134,29 +1216,29 @@ function MapperScreen() {
 
       {/* Simulation Instruction Pill */}
       {simMode && !toastMsg && (
-        <div className="pointer-events-none absolute left-3 top-20 z-10 rounded-xl border border-emerald-500/30 bg-slate-950/90 px-3 py-1.5 text-xs font-medium text-emerald-300 shadow">
+        <div className="pointer-events-none absolute left-3 top-20 z-10 rounded-xl border border-emerald-200 bg-white/95 px-3 py-1.5 text-xs font-semibold text-emerald-700 shadow">
           Tap map to step along ESUT roads
         </div>
       )}
 
       {/* Bottom Floating Control Dock */}
-      <footer className="pointer-events-auto absolute inset-x-3 bottom-3 z-20 mx-auto max-w-lg rounded-3xl border border-white/10 bg-slate-950/90 p-3.5 pb-[max(0.875rem,env(safe-area-inset-bottom))] shadow-lg backdrop-blur-md">
+      <footer className="pointer-events-auto absolute inset-x-3 bottom-3 z-20 mx-auto max-w-lg rounded-3xl border border-slate-200/90 bg-white/95 p-3.5 pb-[max(0.875rem,env(safe-area-inset-bottom))] shadow-lg backdrop-blur-md">
         {/* Weak GPS Recording Alert */}
         {recState === 'RECORDING' && gpsBad && (
-          <div className="mb-2.5 flex items-center justify-between gap-2 rounded-xl border border-rose-500/30 bg-rose-950/60 px-3 py-2 text-xs font-medium text-rose-200 tabular-nums">
+          <div className="mb-2.5 flex items-center justify-between gap-2 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-medium text-rose-700 tabular-nums">
             <span>Weak GPS ({accuracy !== null ? `±${accuracy}m` : 'none'}) — waiting for clearer signal</span>
           </div>
         )}
 
         {/* Duplicate Overlap Alert */}
         {recState === 'RECORDING' && isOverlappingPath && (
-          <div className="mb-2.5 flex items-center justify-between gap-2 rounded-xl border border-amber-500/40 bg-amber-950/70 px-3 py-2 text-xs text-amber-200">
+          <div className="mb-2.5 flex items-center justify-between gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
             <span className="font-medium">Already mapped — walking on an existing path</span>
             <div className="flex shrink-0 gap-1.5">
               <button
                 type="button"
                 onClick={handleTogglePauseResume}
-                className="rounded-lg bg-slate-900 px-2 py-1 text-[11px] font-semibold text-slate-100"
+                className="rounded-lg bg-slate-100 px-2 py-1 text-[11px] font-semibold text-slate-900"
               >
                 Pause
               </button>
@@ -1171,41 +1253,47 @@ function MapperScreen() {
           </div>
         )}
 
-        {/* Cadence & Distance Telemetry Row */}
-        <div className="mb-3">
-          <div className="mb-1.5 flex items-center justify-between gap-2 text-xs">
-            <span className={`font-medium tabular-nums ${isSnapDue ? 'text-emerald-400' : 'text-slate-300'}`}>
-              {isSnapDue
-                ? `50m reached — snap a road view photo`
-                : `Next road photo: ${cadenceMeters}m / ${CADENCE_TARGET_M}m`}
+        {/* Contextual Idle Prompt OR Active Cadence & Distance Telemetry Row */}
+        {recState === 'IDLE' ? (
+          <div className="mb-3 flex items-center justify-between gap-2 text-xs text-slate-700">
+            <span className="truncate">
+              Stand at an unmapped road or blue ring, then tap Start Path
             </span>
+          </div>
+        ) : (
+          <div className="mb-3">
+            <div className="mb-1.5 flex items-center justify-between gap-2 text-xs">
+              <span className={`font-medium tabular-nums ${isSnapDue ? 'text-emerald-600' : 'text-slate-700'}`}>
+                {isSnapDue
+                  ? `50m reached — snap a road view photo`
+                  : `Next road photo: ${cadenceMeters}m / ${CADENCE_TARGET_M}m`}
+              </span>
 
-            <div className="flex items-center gap-2">
-              {recState !== 'IDLE' && (
+              <div className="flex items-center gap-2">
                 <button
                   type="button"
                   onClick={handleUndoLast3}
-                  className="rounded-lg border border-white/10 bg-slate-900 px-2 py-0.5 text-[11px] font-medium text-slate-300 transition-transform duration-150 ease-out hover:bg-slate-800 active:scale-95"
+                  className="rounded-lg border border-slate-200 bg-slate-100 px-2 py-0.5 text-[11px] font-medium text-slate-700 transition-transform duration-150 ease-out hover:bg-slate-200/70 active:scale-95"
                 >
                   Undo 3 pts
                 </button>
-              )}
-              <span className="rounded-lg border border-white/10 bg-slate-900 px-2 py-0.5 text-xs font-semibold text-slate-200 tabular-nums">
-                {pathDistance}m
-              </span>
+                <span className="rounded-lg border border-slate-200 bg-slate-100 px-2 py-0.5 text-xs font-semibold text-slate-800 tabular-nums">
+                  {pathDistance}m
+                </span>
+              </div>
+            </div>
+
+            {/* Compositor-only scaleX progress bar */}
+            <div className="h-1.5 w-full overflow-hidden rounded-full bg-slate-200">
+              <div
+                className={`size-full origin-left rounded-full transition-transform duration-150 ease-out ${
+                  isSnapDue ? 'bg-emerald-400' : 'bg-sky-400'
+                }`}
+                style={{ transform: `scaleX(${cadenceRatio})` }}
+              />
             </div>
           </div>
-
-          {/* Compositor-only scaleX progress bar */}
-          <div className="h-1.5 w-full overflow-hidden rounded-full bg-slate-800">
-            <div
-              className={`size-full origin-left rounded-full transition-transform duration-150 ease-out ${
-                isSnapDue ? 'bg-emerald-400' : 'bg-sky-400'
-              }`}
-              style={{ transform: `scaleX(${cadenceRatio})` }}
-            />
-          </div>
-        </div>
+        )}
 
         {/* Disciplined Action Grid: One primary accent, quiet secondary surfaces */}
         <div className="grid grid-cols-12 gap-2">
@@ -1213,7 +1301,7 @@ function MapperScreen() {
             <button
               type="button"
               onClick={() => handleStartPath()}
-              className="col-span-5 flex h-13 items-center justify-center gap-2 rounded-2xl bg-emerald-500 text-sm font-semibold text-slate-950 shadow transition-transform duration-150 ease-out hover:bg-emerald-400 active:scale-95"
+              className="col-span-5 flex h-13 items-center justify-center gap-2 rounded-2xl bg-emerald-600 text-sm font-semibold text-white shadow transition-transform duration-150 ease-out hover:bg-emerald-700 active:scale-95"
             >
               <svg className="size-4 fill-current" viewBox="0 0 24 24">
                 <polygon points="5 3 19 12 5 21 5 3" />
@@ -1225,11 +1313,11 @@ function MapperScreen() {
               <button
                 type="button"
                 onClick={handleTogglePauseResume}
-                className="flex h-13 flex-col items-center justify-center rounded-2xl border border-white/10 bg-slate-900 text-xs font-medium text-slate-200 transition-transform duration-150 ease-out hover:bg-slate-800 active:scale-95"
+                className="flex h-13 flex-col items-center justify-center rounded-2xl border border-slate-200 bg-slate-100 text-xs font-medium text-slate-800 transition-transform duration-150 ease-out hover:bg-slate-200/70 active:scale-95"
               >
                 {recState === 'RECORDING' ? (
                   <>
-                    <svg className="mb-0.5 size-3.5 fill-current text-amber-400" viewBox="0 0 24 24">
+                    <svg className="mb-0.5 size-3.5 fill-current text-amber-600" viewBox="0 0 24 24">
                       <rect x="6" y="4" width="4" height="16" />
                       <rect x="14" y="4" width="4" height="16" />
                     </svg>
@@ -1237,7 +1325,7 @@ function MapperScreen() {
                   </>
                 ) : (
                   <>
-                    <svg className="mb-0.5 size-3.5 fill-current text-emerald-400" viewBox="0 0 24 24">
+                    <svg className="mb-0.5 size-3.5 fill-current text-emerald-600" viewBox="0 0 24 24">
                       <polygon points="5 3 19 12 5 21 5 3" />
                     </svg>
                     <span>Resume</span>
@@ -1247,7 +1335,7 @@ function MapperScreen() {
               <button
                 type="button"
                 onClick={handleOpenSavePathSheet}
-                className="flex h-13 flex-col items-center justify-center rounded-2xl bg-emerald-500 text-xs font-semibold text-slate-950 transition-transform duration-150 ease-out hover:bg-emerald-400 active:scale-95"
+                className="flex h-13 flex-col items-center justify-center rounded-2xl bg-emerald-600 text-xs font-semibold text-white transition-transform duration-150 ease-out hover:bg-emerald-700 active:scale-95"
               >
                 <svg className="mb-0.5 size-3.5 fill-current" viewBox="0 0 24 24">
                   <polyline points="20 6 9 17 4 12" fill="none" stroke="currentColor" strokeWidth="3" />
@@ -1262,12 +1350,12 @@ function MapperScreen() {
             onClick={handleTapSnap}
             className={`col-span-4 flex h-13 items-center justify-center gap-2 rounded-2xl text-sm font-semibold transition-transform duration-150 ease-out active:scale-95 ${
               isSnapDue
-                ? 'bg-emerald-500 text-slate-950 shadow'
-                : 'border border-white/10 bg-slate-900 text-slate-100 hover:bg-slate-800'
+                ? 'bg-emerald-600 text-white shadow'
+                : 'border border-slate-200 bg-slate-100 text-slate-900 hover:bg-slate-200/70'
             }`}
           >
             <svg
-              className={`size-4 ${isSnapDue ? 'text-slate-950' : 'text-sky-400'}`}
+              className={`size-4 ${isSnapDue ? 'text-white' : 'text-sky-600'}`}
               viewBox="0 0 24 24"
               fill="none"
               stroke="currentColor"
@@ -1282,9 +1370,9 @@ function MapperScreen() {
           <button
             type="button"
             onClick={handleOpenFlagBranch}
-            className="col-span-3 flex h-13 flex-col items-center justify-center rounded-2xl border border-white/10 bg-slate-900 text-xs font-medium text-slate-200 transition-transform duration-150 ease-out hover:bg-slate-800 active:scale-95"
+            className="col-span-3 flex h-13 flex-col items-center justify-center rounded-2xl border border-slate-200 bg-slate-100 text-xs font-medium text-slate-800 transition-transform duration-150 ease-out hover:bg-slate-200/70 active:scale-95"
           >
-            <svg className="mb-0.5 size-3.5 text-amber-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <svg className="mb-0.5 size-3.5 text-amber-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z" />
               <line x1="4" y1="22" x2="4" y2="15" />
             </svg>
@@ -1308,24 +1396,24 @@ function MapperScreen() {
           role="dialog"
           aria-modal="true"
           aria-labelledby="onboarding-title"
-          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/90 p-5 backdrop-blur-sm"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 p-5 backdrop-blur-sm"
         >
-          <div className="w-full max-w-sm rounded-3xl border border-white/10 bg-slate-900 p-6 shadow-xl">
-            <div className="mb-3 inline-flex items-center gap-2 rounded-full border border-white/10 bg-slate-950 px-3 py-1 text-xs font-medium text-slate-300">
+          <div className="w-full max-w-sm rounded-3xl border border-slate-200 bg-white p-6 shadow-xl">
+            <div className="mb-3 inline-flex items-center gap-2 rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs font-medium text-slate-700">
               <span className="size-2 rounded-full bg-emerald-400" />
               ESUT Agbani Field Mapper
             </div>
-            <h1 id="onboarding-title" className="mb-1 text-xl font-semibold text-balance text-slate-100">
+            <h1 id="onboarding-title" className="mb-1 text-xl font-semibold text-balance text-slate-900">
               {profile ? `Ready to map, ${profile.name}` : 'Set up your scout profile'}
             </h1>
-            <p className="mb-5 text-xs leading-relaxed text-pretty text-slate-400">
+            <p className="mb-5 text-xs leading-relaxed text-pretty text-slate-500">
               {profile
                 ? 'Start the session to enable GPS tracking, compass heading, and screen wake lock.'
                 : 'Enter your name and starting zone. You can switch zones at any time from the top bar.'}
             </p>
             {!profile && (
               <>
-                <label htmlFor="scout-name-input" className="mb-1.5 block text-xs font-medium text-slate-300">
+                <label htmlFor="scout-name-input" className="mb-1.5 block text-xs font-medium text-slate-700">
                   Scout name
                 </label>
                 <input
@@ -1333,16 +1421,16 @@ function MapperScreen() {
                   value={nameInput}
                   onChange={(e) => setNameInput(e.target.value)}
                   placeholder="Munachi"
-                  className="mb-3.5 w-full rounded-xl border border-white/10 bg-slate-950 px-3.5 py-2.5 text-sm text-slate-100 outline-none focus:border-emerald-500"
+                  className="mb-3.5 w-full rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-sm text-slate-900 outline-none focus:border-emerald-500"
                 />
-                <label htmlFor="scout-zone-select" className="mb-1.5 block text-xs font-medium text-slate-300">
+                <label htmlFor="scout-zone-select" className="mb-1.5 block text-xs font-medium text-slate-700">
                   Starting zone
                 </label>
                 <select
                   id="scout-zone-select"
                   value={zoneInput}
                   onChange={(e) => setZoneInput(e.target.value)}
-                  className="mb-5 w-full rounded-xl border border-white/10 bg-slate-950 px-3.5 py-2.5 text-sm text-slate-100 outline-none focus:border-emerald-500"
+                  className="mb-5 w-full rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-sm text-slate-900 outline-none focus:border-emerald-500"
                 >
                   {ZONES.map((z) => (
                     <option key={z} value={z}>
@@ -1358,9 +1446,55 @@ function MapperScreen() {
                 const p = profile ?? { name: nameInput.trim() || 'Scout', zone: zoneInput };
                 startHardwareSession(p);
               }}
-              className="w-full rounded-2xl bg-emerald-500 py-3 text-sm font-semibold text-slate-950 transition-transform duration-150 ease-out hover:bg-emerald-400 active:scale-95"
+              className="w-full rounded-2xl bg-emerald-600 py-3 text-sm font-semibold text-white transition-transform duration-150 ease-out hover:bg-emerald-700 active:scale-95"
             >
               Start Mapping Session
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* 1-Tap Map Legend & Quick Guide Sheet */}
+      {isHelpOpen && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="Map legend and quick guide"
+          className="fixed inset-0 z-50 flex items-end justify-center bg-slate-950/40"
+          onClick={() => setIsHelpOpen(false)}
+        >
+          <div
+            className="w-full max-w-lg rounded-t-3xl border-t border-slate-200 bg-white p-5 pb-[max(1.5rem,env(safe-area-inset-bottom))]"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h2 className="mb-1 text-base font-semibold text-balance">Map guide</h2>
+            <p className="mb-4 text-xs text-pretty text-slate-500">
+              Walk unmapped roads with Start Path, snap photos at buildings or every 50m, and drop Branch pins at side shortcuts.
+            </p>
+            <div className="mb-4 space-y-2.5 rounded-2xl border border-slate-200 bg-slate-50 p-3.5 text-xs">
+              <div className="flex items-center gap-3">
+                <span className="h-1.5 w-6 shrink-0 rounded-full bg-sky-400 ring-2 ring-sky-950" />
+                <span className="text-slate-800">Blue dotted line — already mapped (skip these)</span>
+              </div>
+              <div className="flex items-center gap-3">
+                <span className="size-3.5 shrink-0 rounded-full border-2 border-sky-300 bg-sky-950" />
+                <span className="text-slate-800">Hollow blue ring — unfinished road end (tap to continue)</span>
+              </div>
+              <div className="flex items-center gap-3">
+                <span className="size-3.5 shrink-0 rounded-full border-2 border-white bg-orange-500" />
+                <span className="text-slate-800">Orange dot — unmapped shortcut (tap to claim &amp; walk)</span>
+              </div>
+              <div className="flex items-center gap-3">
+                <span className="h-1.5 w-6 shrink-0 rounded-full border border-dashed border-emerald-400 bg-emerald-400/40" />
+                <span className="text-slate-800">Green dashed line — the path you are recording right now</span>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => setIsHelpOpen(false)}
+              className="w-full rounded-xl bg-emerald-600 py-2.5 text-xs font-semibold text-white"
+            >
+              Got it
             </button>
           </div>
         </div>
@@ -1372,15 +1506,15 @@ function MapperScreen() {
           role="dialog"
           aria-modal="true"
           aria-label="Switch active campus zone"
-          className="fixed inset-0 z-50 flex items-end justify-center bg-black/60"
+          className="fixed inset-0 z-50 flex items-end justify-center bg-slate-950/40"
           onClick={() => setIsZonePickerOpen(false)}
         >
           <div
-            className="w-full max-w-lg rounded-t-3xl border-t border-white/10 bg-slate-900 p-5 pb-[max(1.5rem,env(safe-area-inset-bottom))]"
+            className="w-full max-w-lg rounded-t-3xl border-t border-slate-200 bg-white p-5 pb-[max(1.5rem,env(safe-area-inset-bottom))]"
             onClick={(e) => e.stopPropagation()}
           >
             <h2 className="mb-1 text-base font-semibold text-balance">Switch active zone</h2>
-            <p className="mb-3 text-xs text-pretty text-slate-400">
+            <p className="mb-3 text-xs text-pretty text-slate-500">
               Choose the campus zone you are walking in right now.
             </p>
             <div className="space-y-1.5">
@@ -1393,12 +1527,12 @@ function MapperScreen() {
                     onClick={() => handleZoneChange(z)}
                     className={`flex w-full items-center justify-between rounded-xl border px-3.5 py-2.5 text-left text-xs font-medium ${
                       active
-                        ? 'border-emerald-500/40 bg-emerald-950/50 text-emerald-200'
-                        : 'border-white/5 bg-slate-950 text-slate-300 hover:bg-slate-800'
+                        ? 'border-emerald-300 bg-emerald-50 text-emerald-800'
+                        : 'border-slate-200 bg-slate-50 text-slate-700 hover:bg-slate-200/70'
                     }`}
                   >
                     <span>{z}</span>
-                    {active && <span className="text-emerald-400">Current</span>}
+                    {active && <span className="text-emerald-600">Current</span>}
                   </button>
                 );
               })}
@@ -1413,15 +1547,15 @@ function MapperScreen() {
           role="dialog"
           aria-modal="true"
           aria-labelledby="save-path-title"
-          className="fixed inset-0 z-50 flex items-end justify-center bg-black/65"
+          className="fixed inset-0 z-50 flex items-end justify-center bg-slate-950/45"
         >
-          <div className="w-full max-w-lg rounded-t-3xl border-t border-white/10 bg-slate-900 p-5 pb-[max(1.5rem,env(safe-area-inset-bottom))]">
+          <div className="w-full max-w-lg rounded-t-3xl border-t border-slate-200 bg-white p-5 pb-[max(1.5rem,env(safe-area-inset-bottom))]">
             <div className="mb-3 flex items-start justify-between gap-3">
               <div>
                 <h2 id="save-path-title" className="text-base font-semibold text-balance tabular-nums">
                   Save {pendingPathSave.distance}m path
                 </h2>
-                <p className="text-xs text-pretty text-slate-400 tabular-nums">
+                <p className="text-xs text-pretty text-slate-500 tabular-nums">
                   {pendingPathSave.coords.length} points recorded. Add an optional road or area name.
                 </p>
               </div>
@@ -1437,7 +1571,7 @@ function MapperScreen() {
                 <button
                   type="button"
                   onClick={() => setConfirmDeleteId('active-path')}
-                  className="rounded-xl border border-rose-500/30 bg-rose-950/50 px-2.5 py-1.5 text-xs font-medium text-rose-300"
+                  className="rounded-xl border border-rose-200 bg-rose-50 px-2.5 py-1.5 text-xs font-medium text-rose-700"
                 >
                   Discard
                 </button>
@@ -1445,7 +1579,7 @@ function MapperScreen() {
             </div>
 
             {pendingPathSave.overlapRatio >= 0.75 && (
-              <div className="mb-3 rounded-xl border border-amber-500/40 bg-amber-950/60 px-3 py-2 text-xs text-pretty text-amber-200 tabular-nums">
+              <div className="mb-3 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-pretty text-amber-900 tabular-nums">
                 {Math.round(pendingPathSave.overlapRatio * 100)}% of this walk overlaps an already-mapped path. Discard it unless this is a separate parallel footpath.
               </div>
             )}
@@ -1456,7 +1590,7 @@ function MapperScreen() {
                   type="button"
                   key={chip}
                   onClick={() => setPathNameInput((prev) => (prev ? `${prev}, ${chip}` : chip))}
-                  className="rounded-lg border border-white/10 bg-slate-950 px-2.5 py-1 text-xs font-medium text-slate-300 hover:bg-slate-800"
+                  className="rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-1 text-xs font-medium text-slate-700 hover:bg-slate-200/70"
                 >
                   + {chip}
                 </button>
@@ -1467,7 +1601,7 @@ function MapperScreen() {
               value={pathNameInput}
               onChange={(e) => setPathNameInput(e.target.value)}
               placeholder="Road or shortcut name (e.g., Main Road to ETF)"
-              className="mb-4 w-full rounded-xl border border-white/10 bg-slate-950 px-3.5 py-2.5 text-sm text-slate-100 outline-none focus:border-emerald-500"
+              className="mb-4 w-full rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-sm text-slate-900 outline-none focus:border-emerald-500"
             />
 
             <div className="flex gap-2">
@@ -1479,7 +1613,7 @@ function MapperScreen() {
                   recStateRef.current = 'RECORDING';
                   setRecState('RECORDING');
                 }}
-                className="flex-1 rounded-xl border border-white/10 bg-slate-950 py-3 text-xs font-semibold text-slate-200"
+                className="flex-1 rounded-xl border border-slate-200 bg-slate-50 py-3 text-xs font-semibold text-slate-800"
               >
                 Keep Walking
               </button>
@@ -1487,7 +1621,7 @@ function MapperScreen() {
                 type="button"
                 disabled={isSavingPath}
                 onClick={handleConfirmSavePath}
-                className="flex-[2] rounded-xl bg-emerald-500 py-3 text-xs font-semibold text-slate-950"
+                className="flex-[2] rounded-xl bg-emerald-600 py-3 text-xs font-semibold text-white"
               >
                 {isSavingPath ? 'Saving...' : 'Save Path'}
               </button>
@@ -1502,17 +1636,17 @@ function MapperScreen() {
           role="dialog"
           aria-modal="true"
           aria-labelledby="flag-branch-title"
-          className="fixed inset-0 z-50 flex items-end justify-center bg-black/65"
+          className="fixed inset-0 z-50 flex items-end justify-center bg-slate-950/45"
           onClick={() => setIsBranchModalOpen(false)}
         >
           <div
-            className="w-full max-w-lg rounded-t-3xl border-t border-white/10 bg-slate-900 p-5 pb-[max(1.5rem,env(safe-area-inset-bottom))]"
+            className="w-full max-w-lg rounded-t-3xl border-t border-slate-200 bg-white p-5 pb-[max(1.5rem,env(safe-area-inset-bottom))]"
             onClick={(e) => e.stopPropagation()}
           >
             <h2 id="flag-branch-title" className="mb-1 text-base font-semibold text-balance">
               Flag unmapped shortcut
             </h2>
-            <p className="mb-3 text-xs text-pretty text-slate-400">
+            <p className="mb-3 text-xs text-pretty text-slate-500">
               Drop a pin here so you or a teammate can map this branch next.
             </p>
             <div className="mb-3 flex flex-wrap gap-1.5">
@@ -1523,8 +1657,8 @@ function MapperScreen() {
                   onClick={() => setBranchNoteInput(chip)}
                   className={`rounded-lg border px-2.5 py-1 text-xs font-medium ${
                     branchNoteInput === chip
-                      ? 'border-amber-400/50 bg-amber-950/60 text-amber-200'
-                      : 'border-white/10 bg-slate-950 text-slate-300'
+                      ? 'border-amber-300 bg-amber-50 text-amber-900'
+                      : 'border-slate-200 bg-slate-50 text-slate-700'
                   }`}
                 >
                   {chip}
@@ -1535,13 +1669,13 @@ function MapperScreen() {
               value={branchNoteInput}
               onChange={(e) => setBranchNoteInput(e.target.value)}
               placeholder="Where does this shortcut lead?"
-              className="mb-4 w-full rounded-xl border border-white/10 bg-slate-950 px-3.5 py-2.5 text-sm text-slate-100 outline-none focus:border-amber-400"
+              className="mb-4 w-full rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-sm text-slate-900 outline-none focus:border-amber-400"
             />
             <div className="flex gap-2">
               <button
                 type="button"
                 onClick={() => setIsBranchModalOpen(false)}
-                className="flex-1 rounded-xl border border-white/10 bg-slate-950 py-3 text-xs font-semibold text-slate-200"
+                className="flex-1 rounded-xl border border-slate-200 bg-slate-50 py-3 text-xs font-semibold text-slate-800"
               >
                 Cancel
               </button>
@@ -1549,9 +1683,13 @@ function MapperScreen() {
                 type="button"
                 disabled={isSavingBranch}
                 onClick={handleConfirmFlagBranch}
-                className="flex-[2] rounded-xl bg-emerald-500 py-3 text-xs font-semibold text-slate-950"
+                className="flex-[2] rounded-xl bg-emerald-600 py-3 text-xs font-semibold text-white"
               >
-                {isSavingBranch ? 'Dropping Pin...' : 'Drop Shortcut Pin'}
+                {isSavingBranch
+                  ? 'Dropping Pin...'
+                  : recState !== 'IDLE'
+                    ? 'Drop Pin & Continue Route'
+                    : 'Drop Shortcut Pin'}
               </button>
             </div>
           </div>
@@ -1601,14 +1739,14 @@ function MapperScreen() {
           role="dialog"
           aria-modal="true"
           aria-labelledby="tag-photo-title"
-          className="fixed inset-0 z-50 flex items-end justify-center bg-black/65"
+          className="fixed inset-0 z-50 flex items-end justify-center bg-slate-950/45"
         >
-          <div className="w-full max-w-lg rounded-t-3xl border-t border-white/10 bg-slate-900 p-5 pb-[max(1.5rem,env(safe-area-inset-bottom))]">
+          <div className="w-full max-w-lg rounded-t-3xl border-t border-slate-200 bg-white p-5 pb-[max(1.5rem,env(safe-area-inset-bottom))]">
             <div className="mb-3 flex items-center justify-between">
               <h2 id="tag-photo-title" className="text-base font-semibold text-balance">
                 Tag photo pin
               </h2>
-              <span className="rounded-lg border border-white/10 bg-slate-950 px-2 py-0.5 text-xs font-medium text-slate-300 tabular-nums">
+              <span className="rounded-lg border border-slate-200 bg-slate-50 px-2 py-0.5 text-xs font-medium text-slate-700 tabular-nums">
                 Heading: {frozenHeading ?? '--'}°
               </span>
             </div>
@@ -1624,8 +1762,8 @@ function MapperScreen() {
                   onClick={() => setPhotoCategory(cat)}
                   className={`rounded-xl border px-3 py-2 text-xs font-medium ${
                     photoCategory === cat
-                      ? 'border-emerald-500/50 bg-emerald-950/50 text-emerald-200'
-                      : 'border-white/10 bg-slate-950 text-slate-300'
+                      ? 'border-emerald-300 bg-emerald-50 text-emerald-800'
+                      : 'border-slate-200 bg-slate-50 text-slate-700'
                   }`}
                 >
                   {cat}
@@ -1638,7 +1776,7 @@ function MapperScreen() {
                   type="button"
                   key={b}
                   onClick={() => setPhotoLabel(b)}
-                  className="rounded-lg border border-white/10 bg-slate-950 px-2.5 py-1 text-xs text-slate-300 hover:bg-slate-800"
+                  className="rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-1 text-xs text-slate-700 hover:bg-slate-200/70"
                 >
                   + {b}
                 </button>
@@ -1648,7 +1786,7 @@ function MapperScreen() {
               value={photoLabel}
               onChange={(e) => setPhotoLabel(e.target.value)}
               placeholder="Building name or turn label (optional for 50m road views)"
-              className="mb-4 w-full rounded-xl border border-white/10 bg-slate-950 px-3.5 py-2.5 text-sm text-slate-100 outline-none focus:border-emerald-500"
+              className="mb-4 w-full rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-2.5 text-sm text-slate-900 outline-none focus:border-emerald-500"
             />
             <div className="flex gap-2">
               <button
@@ -1662,7 +1800,7 @@ function MapperScreen() {
                     return null;
                   });
                 }}
-                className="flex-1 rounded-xl border border-white/10 bg-slate-950 py-3 text-xs font-semibold text-slate-200"
+                className="flex-1 rounded-xl border border-slate-200 bg-slate-50 py-3 text-xs font-semibold text-slate-800"
               >
                 Cancel
               </button>
@@ -1670,7 +1808,7 @@ function MapperScreen() {
                 type="button"
                 disabled={isSavingPhoto}
                 onClick={handleSavePhotoPin}
-                className="flex-[2] rounded-xl bg-emerald-500 py-3 text-xs font-semibold text-slate-950"
+                className="flex-[2] rounded-xl bg-emerald-600 py-3 text-xs font-semibold text-white"
               >
                 {isSavingPhoto ? 'Saving...' : 'Save Pin'}
               </button>
@@ -1685,11 +1823,11 @@ function MapperScreen() {
           role="dialog"
           aria-modal="true"
           aria-label="Shortcut pin details"
-          className="fixed inset-0 z-50 flex items-end justify-center bg-black/60"
+          className="fixed inset-0 z-50 flex items-end justify-center bg-slate-950/40"
           onClick={() => setSelectedPin(null)}
         >
           <div
-            className="w-full max-w-lg rounded-t-3xl border-t border-white/10 bg-slate-900 p-5 pb-[max(1.5rem,env(safe-area-inset-bottom))]"
+            className="w-full max-w-lg rounded-t-3xl border-t border-slate-200 bg-white p-5 pb-[max(1.5rem,env(safe-area-inset-bottom))]"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="mb-1 flex items-center justify-between gap-2">
@@ -1706,13 +1844,13 @@ function MapperScreen() {
                 <button
                   type="button"
                   onClick={() => setConfirmDeleteId(selectedPin.id)}
-                  className="rounded-lg border border-rose-500/30 bg-rose-950/50 px-2.5 py-1 text-xs font-medium text-rose-300"
+                  className="rounded-lg border border-rose-200 bg-rose-50 px-2.5 py-1 text-xs font-medium text-rose-700"
                 >
                   Delete
                 </button>
               )}
             </div>
-            <p className="mb-4 text-xs text-slate-400 tabular-nums">
+            <p className="mb-4 text-xs text-slate-500 tabular-nums">
               Flagged by {selectedPin.created_by} (
               {userCoord
                 ? `${Math.round(haversineMeters(userCoord, [selectedPin.lng, selectedPin.lat]))}m away`
@@ -1723,7 +1861,7 @@ function MapperScreen() {
               <button
                 type="button"
                 onClick={() => handleClaimPin(selectedPin)}
-                className="flex-1 rounded-xl border border-white/10 bg-slate-950 py-3 text-xs font-semibold text-slate-100"
+                className="flex-1 rounded-xl border border-slate-200 bg-slate-50 py-3 text-xs font-semibold text-slate-900"
               >
                 Claim & Guide
               </button>
@@ -1733,7 +1871,7 @@ function MapperScreen() {
                   setSelectedPin(null);
                   handleStartPath([selectedPin.lng, selectedPin.lat]);
                 }}
-                className="flex-1 rounded-xl bg-emerald-500 py-3 text-xs font-semibold text-slate-950"
+                className="flex-1 rounded-xl bg-emerald-600 py-3 text-xs font-semibold text-white"
               >
                 Start Path Here
               </button>
@@ -1746,7 +1884,7 @@ function MapperScreen() {
                   setSelectedPin(null);
                   showToast('Link copied');
                 }}
-                className="rounded-xl border border-white/10 bg-slate-950 px-3.5 py-3 text-xs font-semibold text-slate-300"
+                className="rounded-xl border border-slate-200 bg-slate-50 px-3.5 py-3 text-xs font-semibold text-slate-700"
               >
                 Share
               </button>
@@ -1761,22 +1899,22 @@ function MapperScreen() {
           role="dialog"
           aria-modal="true"
           aria-label="Photo pin details"
-          className="fixed inset-0 z-50 flex items-end justify-center bg-black/60"
+          className="fixed inset-0 z-50 flex items-end justify-center bg-slate-950/40"
           onClick={() => setSelectedPhotoPin(null)}
         >
           <div
-            className="w-full max-w-lg rounded-t-3xl border-t border-white/10 bg-slate-900 p-5 pb-[max(1.5rem,env(safe-area-inset-bottom))]"
+            className="w-full max-w-lg rounded-t-3xl border-t border-slate-200 bg-white p-5 pb-[max(1.5rem,env(safe-area-inset-bottom))]"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="mb-3 flex items-start justify-between gap-2">
               <div>
-                <span className="rounded-md border border-white/10 bg-slate-950 px-2 py-0.5 text-[11px] font-medium text-sky-300">
+                <span className="rounded-md border border-slate-200 bg-slate-50 px-2 py-0.5 text-[11px] font-medium text-sky-700">
                   {selectedPhotoPin.category}
                 </span>
                 <h2 className="mt-1 text-base font-semibold text-balance">
                   {selectedPhotoPin.label || 'Road view photo'}
                 </h2>
-                <p className="text-xs text-slate-400 tabular-nums">
+                <p className="text-xs text-slate-500 tabular-nums">
                   {selectedPhotoPin.scout_name ? `Mapped by ${selectedPhotoPin.scout_name}, ` : ''}
                   heading {selectedPhotoPin.heading ?? '--'}°
                 </p>
@@ -1793,7 +1931,7 @@ function MapperScreen() {
                 <button
                   type="button"
                   onClick={() => setConfirmDeleteId(selectedPhotoPin.id)}
-                  className="rounded-xl border border-rose-500/30 bg-rose-950/50 px-3 py-1.5 text-xs font-medium text-rose-300"
+                  className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-1.5 text-xs font-medium text-rose-700"
                 >
                   Delete Pin
                 </button>
@@ -1810,7 +1948,7 @@ function MapperScreen() {
             <button
               type="button"
               onClick={() => setSelectedPhotoPin(null)}
-              className="w-full rounded-xl border border-white/10 bg-slate-950 py-2.5 text-xs font-semibold text-slate-200"
+              className="w-full rounded-xl border border-slate-200 bg-slate-50 py-2.5 text-xs font-semibold text-slate-800"
             >
               Close
             </button>
@@ -1824,22 +1962,22 @@ function MapperScreen() {
           role="dialog"
           aria-modal="true"
           aria-label="Mapped path details"
-          className="fixed inset-0 z-50 flex items-end justify-center bg-black/60"
+          className="fixed inset-0 z-50 flex items-end justify-center bg-slate-950/40"
           onClick={() => setSelectedPath(null)}
         >
           <div
-            className="w-full max-w-lg rounded-t-3xl border-t border-white/10 bg-slate-900 p-5 pb-[max(1.5rem,env(safe-area-inset-bottom))]"
+            className="w-full max-w-lg rounded-t-3xl border-t border-slate-200 bg-white p-5 pb-[max(1.5rem,env(safe-area-inset-bottom))]"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="mb-4 flex items-start justify-between gap-2">
               <div>
-                <span className="rounded-md border border-white/10 bg-slate-950 px-2 py-0.5 text-[11px] font-medium text-sky-300 tabular-nums">
+                <span className="rounded-md border border-slate-200 bg-slate-50 px-2 py-0.5 text-[11px] font-medium text-sky-700 tabular-nums">
                   {selectedPath.distance_m}m route
                 </span>
                 <h2 className="mt-1 text-base font-semibold text-balance">
                   {selectedPath.name || 'Campus footpath'}
                 </h2>
-                <p className="text-xs text-slate-400 tabular-nums">
+                <p className="text-xs text-slate-500 tabular-nums">
                   Mapped by {selectedPath.scout_name} in {selectedPath.zone.split(':')[0]} ({selectedPath.coordinates.length} points)
                 </p>
               </div>
@@ -1855,7 +1993,7 @@ function MapperScreen() {
                 <button
                   type="button"
                   onClick={() => setConfirmDeleteId(selectedPath.id)}
-                  className="rounded-xl border border-rose-500/30 bg-rose-950/50 px-3 py-1.5 text-xs font-medium text-rose-300"
+                  className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-1.5 text-xs font-medium text-rose-700"
                 >
                   Delete Path
                 </button>
@@ -1884,14 +2022,14 @@ function MapperScreen() {
                     showToast('Follow the dashed guide line to continue from this end');
                   }
                 }}
-                className="flex-[2] rounded-xl bg-emerald-500 py-2.5 text-xs font-semibold text-slate-950"
+                className="flex-[2] rounded-xl bg-emerald-600 py-2.5 text-xs font-semibold text-white"
               >
                 Continue from End
               </button>
               <button
                 type="button"
                 onClick={() => setSelectedPath(null)}
-                className="flex-1 rounded-xl border border-white/10 bg-slate-950 py-2.5 text-xs font-semibold text-slate-200"
+                className="flex-1 rounded-xl border border-slate-200 bg-slate-50 py-2.5 text-xs font-semibold text-slate-800"
               >
                 Close
               </button>
@@ -1906,15 +2044,15 @@ function MapperScreen() {
           role="dialog"
           aria-modal="true"
           aria-label="Unfinished path endpoint"
-          className="fixed inset-0 z-50 flex items-end justify-center bg-black/60"
+          className="fixed inset-0 z-50 flex items-end justify-center bg-slate-950/40"
           onClick={() => setSelectedFrontier(null)}
         >
           <div
-            className="w-full max-w-lg rounded-t-3xl border-t border-white/10 bg-slate-900 p-5 pb-[max(1.5rem,env(safe-area-inset-bottom))]"
+            className="w-full max-w-lg rounded-t-3xl border-t border-slate-200 bg-white p-5 pb-[max(1.5rem,env(safe-area-inset-bottom))]"
             onClick={(e) => e.stopPropagation()}
           >
             <h2 className="mb-1 text-base font-semibold text-balance">Continue mapping from here</h2>
-            <p className="mb-4 text-xs text-pretty text-slate-400 tabular-nums">
+            <p className="mb-4 text-xs text-pretty text-slate-500 tabular-nums">
               Unfinished path endpoint (
               {userCoord
                 ? `${Math.round(haversineMeters(userCoord, selectedFrontier.coord))}m away`
@@ -1932,7 +2070,7 @@ function MapperScreen() {
                   setFocusCoord(target.coord);
                   showToast('Follow the dashed guide line to this endpoint');
                 }}
-                className="flex-1 rounded-xl border border-white/10 bg-slate-950 py-3 text-xs font-semibold text-slate-100"
+                className="flex-1 rounded-xl border border-slate-200 bg-slate-50 py-3 text-xs font-semibold text-slate-900"
               >
                 Guide Me Here
               </button>
@@ -1943,7 +2081,7 @@ function MapperScreen() {
                   setSelectedFrontier(null);
                   handleStartPath(target.coord);
                 }}
-                className="flex-1 rounded-xl bg-emerald-500 py-3 text-xs font-semibold text-slate-950"
+                className="flex-1 rounded-xl bg-emerald-600 py-3 text-xs font-semibold text-white"
               >
                 Start Path Here
               </button>
@@ -1958,18 +2096,18 @@ function MapperScreen() {
           role="dialog"
           aria-modal="true"
           aria-label="Arrived at path endpoint"
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-5"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-5"
         >
-          <div className="w-full max-w-sm rounded-3xl border border-white/10 bg-slate-900 p-5 text-center shadow-xl">
-            <h2 className="mb-1 text-base font-semibold text-balance text-emerald-400">Arrived at path end</h2>
-            <p className="mb-4 text-xs text-pretty text-slate-300">
+          <div className="w-full max-w-sm rounded-3xl border border-slate-200 bg-white p-5 text-center shadow-xl">
+            <h2 className="mb-1 text-base font-semibold text-balance text-emerald-600">Arrived at path end</h2>
+            <p className="mb-4 text-xs text-pretty text-slate-700">
               Start recording seamlessly from the end of {arrivedFrontier.label}?
             </p>
             <div className="flex gap-2">
               <button
                 type="button"
                 onClick={() => setArrivedFrontier(null)}
-                className="flex-1 rounded-2xl border border-white/10 bg-slate-950 py-3 text-xs font-semibold text-slate-200"
+                className="flex-1 rounded-2xl border border-slate-200 bg-slate-50 py-3 text-xs font-semibold text-slate-800"
               >
                 Later
               </button>
@@ -1980,7 +2118,7 @@ function MapperScreen() {
                   setArrivedFrontier(null);
                   handleStartPath(target.coord);
                 }}
-                className="flex-[2] rounded-2xl bg-emerald-500 py-3 text-sm font-semibold text-slate-950"
+                className="flex-[2] rounded-2xl bg-emerald-600 py-3 text-sm font-semibold text-white"
               >
                 Start Path Here
               </button>
@@ -1995,11 +2133,11 @@ function MapperScreen() {
           role="dialog"
           aria-modal="true"
           aria-label="Recover unsaved walk"
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-5"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-5"
         >
-          <div className="w-full max-w-sm rounded-3xl border border-white/10 bg-slate-900 p-5 shadow-xl">
+          <div className="w-full max-w-sm rounded-3xl border border-slate-200 bg-white p-5 shadow-xl">
             <h2 className="mb-1 text-base font-semibold text-balance">Recover unsaved walk?</h2>
-            <p className="mb-4 text-xs text-pretty text-slate-400 tabular-nums">
+            <p className="mb-4 text-xs text-pretty text-slate-500 tabular-nums">
               Found an unsaved path ({calculatePathDistance(recoveredDraft.activePath)}m, {recoveredDraft.activePath.length} points) from before the page reloaded.
             </p>
             <div className="flex gap-2">
@@ -2010,7 +2148,7 @@ function MapperScreen() {
                   setRecoveredDraft(null);
                   showToast('Discarded previous unsaved walk');
                 }}
-                className="flex-1 rounded-xl border border-white/10 bg-slate-950 py-2.5 text-xs font-semibold text-slate-300"
+                className="flex-1 rounded-xl border border-slate-200 bg-slate-50 py-2.5 text-xs font-semibold text-slate-700"
               >
                 Discard
               </button>
@@ -2029,7 +2167,7 @@ function MapperScreen() {
                   setFocusCoord(d.activePath[d.activePath.length - 1]);
                   showToast('Walk recovered (paused) — tap Resume or Save');
                 }}
-                className="flex-[2] rounded-xl bg-emerald-500 py-2.5 text-xs font-semibold text-slate-950"
+                className="flex-[2] rounded-xl bg-emerald-600 py-2.5 text-xs font-semibold text-white"
               >
                 Recover Walk
               </button>
@@ -2044,13 +2182,13 @@ function MapperScreen() {
           role="dialog"
           aria-modal="true"
           aria-label="Moved while paused"
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-5"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-5"
         >
-          <div className="w-full max-w-sm rounded-3xl border border-white/10 bg-slate-900 p-5 shadow-xl">
+          <div className="w-full max-w-sm rounded-3xl border border-slate-200 bg-white p-5 shadow-xl">
             <h2 className="mb-1 text-base font-semibold text-balance tabular-nums">
               You moved {pauseJumpPrompt.distance}m while paused
             </h2>
-            <p className="mb-4 text-xs text-pretty text-slate-400">
+            <p className="mb-4 text-xs text-pretty text-slate-500">
               Resuming here would draw a straight jump line across the gap. Save the previous segment first instead?
             </p>
             <div className="flex flex-col gap-2">
@@ -2060,7 +2198,7 @@ function MapperScreen() {
                   setPauseJumpPrompt(null);
                   handleOpenSavePathSheet();
                 }}
-                className="w-full rounded-xl bg-emerald-500 py-2.5 text-xs font-semibold text-slate-950"
+                className="w-full rounded-xl bg-emerald-600 py-2.5 text-xs font-semibold text-white"
               >
                 Save Previous Segment First
               </button>
@@ -2071,7 +2209,7 @@ function MapperScreen() {
                   recStateRef.current = 'RECORDING';
                   setRecState('RECORDING');
                 }}
-                className="w-full rounded-xl border border-white/10 bg-slate-950 py-2.5 text-xs font-semibold text-slate-200"
+                className="w-full rounded-xl border border-slate-200 bg-slate-50 py-2.5 text-xs font-semibold text-slate-800"
               >
                 Connect Across Gap Anyway
               </button>
@@ -2086,11 +2224,11 @@ function MapperScreen() {
           role="dialog"
           aria-modal="true"
           aria-label="Arrived at shortcut"
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-5"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-5"
         >
-          <div className="w-full max-w-sm rounded-3xl border border-white/10 bg-slate-900 p-5 text-center shadow-xl">
-            <h2 className="mb-1 text-base font-semibold text-balance text-emerald-400">Arrived at shortcut</h2>
-            <p className="mb-4 text-xs text-pretty text-slate-300">
+          <div className="w-full max-w-sm rounded-3xl border border-slate-200 bg-white p-5 text-center shadow-xl">
+            <h2 className="mb-1 text-base font-semibold text-balance text-emerald-600">Arrived at shortcut</h2>
+            <p className="mb-4 text-xs text-pretty text-slate-700">
               {arrivedPin.note ? `"${arrivedPin.note}" — ` : ''}Start recording from this exact junction?
             </p>
             <button
@@ -2105,7 +2243,7 @@ function MapperScreen() {
                 }
                 handleStartPath([pin.lng, pin.lat]);
               }}
-              className="w-full rounded-2xl bg-emerald-500 py-3 text-sm font-semibold text-slate-950"
+              className="w-full rounded-2xl bg-emerald-600 py-3 text-sm font-semibold text-white"
             >
               Start Path Here
             </button>
@@ -2118,7 +2256,7 @@ function MapperScreen() {
 
 export default function MapperPage() {
   return (
-    <Suspense fallback={<div className="flex h-dvh items-center justify-center bg-slate-950 text-sm text-slate-300">Loading Mapper...</div>}>
+    <Suspense fallback={<div className="flex h-dvh items-center justify-center bg-white text-sm text-slate-600">Loading Mapper...</div>}>
       <MapperScreen />
     </Suspense>
   );
