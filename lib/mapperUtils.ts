@@ -73,7 +73,18 @@ export async function compressToWebP(
 
   return new Promise((resolve, reject) => {
     canvas.toBlob(
-      (blob) => (blob ? resolve(blob) : reject(new Error('WebP compression failed'))),
+      (blob) => {
+        if (blob && blob.type === 'image/webp') {
+          resolve(blob);
+          return;
+        }
+        // iOS Safari silently falls back to uncompressed image/png for image/webp; re-encode as JPEG
+        canvas.toBlob(
+          (jpgBlob) => (jpgBlob ? resolve(jpgBlob) : reject(new Error('Image compression failed'))),
+          'image/jpeg',
+          0.8
+        );
+      },
       'image/webp',
       quality
     );

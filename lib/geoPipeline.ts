@@ -119,7 +119,7 @@ export function findTopologicalSnap(
     const snapped = turf.nearestPointOnLine(line, pt, { units: 'meters' });
     const d = snapped.properties.dist ?? Infinity;
 
-    if (d <= bestDist) {
+    if (d < bestDist - 0.01) {
       bestDist = d;
       result = {
         coord: snapped.geometry.coordinates as Coord,

@@ -16,6 +16,13 @@ create policy "campus_photos_public_insert"
   to anon, authenticated
   with check (bucket_id = 'campus-photos');
 
+drop policy if exists "campus_photos_public_update" on storage.objects;
+create policy "campus_photos_public_update"
+  on storage.objects for update
+  to anon, authenticated
+  using (bucket_id = 'campus-photos')
+  with check (bucket_id = 'campus-photos');
+
 create table if not exists public.paths (
   id uuid primary key default gen_random_uuid(),
   scout_name text not null,
@@ -110,12 +117,17 @@ begin
   end loop;
 
   if jsonb_array_length(v_seg1) >= 2 and jsonb_array_length(v_seg2) >= 2 then
-    update public.paths set coordinates = v_seg1 where id = p_path_id;
+    update public.paths
+      set coordinates = v_seg1,
+          distance_m = round(v_existing.distance_m / 2)
+      where id = p_path_id;
     insert into public.paths (scout_name, zone, name, coordinates, distance_m)
-    values (v_existing.scout_name, v_existing.zone, v_existing.name, v_seg2, v_existing.distance_m / 2);
+    values (v_existing.scout_name, v_existing.zone, v_existing.name, v_seg2, round(v_existing.distance_m / 2));
   end if;
 end;
 $$;
+
+drop function if exists public.save_path_with_split(text, text, jsonb, numeric, uuid, integer, jsonb);
 
 create or replace function public.save_path_with_split(
   p_scout_name text,

@@ -216,12 +216,27 @@ function MapperScreen() {
   const lastPresenceTsRef = useRef(0);
   const [simMode, setSimMode] = useState(false);
   const simModeRef = useRef(false);
+  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const watchIdRef = useRef<number | null>(null);
+  const orientationCleanupRef = useRef<(() => void) | null>(null);
 
   const showToast = useCallback((msg: string) => {
     setToastMsg(msg);
-    setTimeout(() => {
-      setToastMsg((curr) => (curr === msg ? null : curr));
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+    toastTimerRef.current = setTimeout(() => {
+      setToastMsg(null);
+      toastTimerRef.current = null;
     }, 2800);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+      if (watchIdRef.current !== null && 'geolocation' in navigator) {
+        navigator.geolocation.clearWatch(watchIdRef.current);
+      }
+      orientationCleanupRef.current?.();
+    };
   }, []);
 
   const frontierEndpoints = useMemo(() => findFrontierEndpoints(paths, 6), [paths]);
@@ -577,11 +592,19 @@ function MapperScreen() {
       headingRef.current = deg;
       setHeading(deg);
     };
+    orientationCleanupRef.current?.();
     window.addEventListener('deviceorientationabsolute' as keyof WindowEventMap, onAbsoluteOrientation as EventListener);
     window.addEventListener('deviceorientation', onRelativeOrientation);
+    orientationCleanupRef.current = () => {
+      window.removeEventListener('deviceorientationabsolute' as keyof WindowEventMap, onAbsoluteOrientation as EventListener);
+      window.removeEventListener('deviceorientation', onRelativeOrientation);
+    };
 
     if ('geolocation' in navigator) {
-      navigator.geolocation.watchPosition(
+      if (watchIdRef.current !== null) {
+        navigator.geolocation.clearWatch(watchIdRef.current);
+      }
+      watchIdRef.current = navigator.geolocation.watchPosition(
         (pos) => {
           if (simModeRef.current) return;
           const coord: Coord = [pos.coords.longitude, pos.coords.latitude];
@@ -736,7 +759,13 @@ function MapperScreen() {
       activePathRef.current = [];
       setActivePath([]);
       setPathDistance(0);
+      lastTickTsRef.current = null;
+      startSnapMetaRef.current = {};
+      anchorCoordRef.current = null;
+      alertFiredRef.current = false;
       overlapStreakRef.current = 0;
+      setCadenceMeters(0);
+      setIsSnapDue(false);
       setIsOverlappingPath(false);
       setPendingPathSave(null);
       setIsSavingPath(false);
@@ -750,7 +779,13 @@ function MapperScreen() {
     activePathRef.current = [];
     setActivePath([]);
     setPathDistance(0);
+    lastTickTsRef.current = null;
+    startSnapMetaRef.current = {};
+    anchorCoordRef.current = null;
+    alertFiredRef.current = false;
     overlapStreakRef.current = 0;
+    setCadenceMeters(0);
+    setIsSnapDue(false);
     setIsOverlappingPath(false);
     setPendingPathSave(null);
     setConfirmDeleteId(null);
@@ -819,15 +854,22 @@ function MapperScreen() {
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
     ctx.drawImage(video, 0, 0, w, h);
+    const finishBlob = (blob: Blob | null) => {
+      stopCameraStream();
+      if (!blob) return;
+      setPreviewUrl((prev) => {
+        if (prev) URL.revokeObjectURL(prev);
+        return URL.createObjectURL(blob);
+      });
+      setPendingBlob(blob);
+    };
     canvas.toBlob(
       (blob) => {
-        stopCameraStream();
-        if (!blob) return;
-        setPreviewUrl((prev) => {
-          if (prev) URL.revokeObjectURL(prev);
-          return URL.createObjectURL(blob);
-        });
-        setPendingBlob(blob);
+        if (blob && blob.type === 'image/webp') {
+          finishBlob(blob);
+          return;
+        }
+        canvas.toBlob((jpgBlob) => finishBlob(jpgBlob), 'image/jpeg', 0.8);
       },
       'image/webp',
       0.75
@@ -1026,10 +1068,12 @@ function MapperScreen() {
   };
 
   const handleExportGeoJSON = () => {
+    const realPaths = paths.filter((p) => !p.id.startsWith('sim-'));
+    const realPins = photoPins.filter((ph) => !ph.id.startsWith('sim-'));
     const fc = {
       type: 'FeatureCollection',
       features: [
-        ...paths.map((p) => ({
+        ...realPaths.map((p) => ({
           type: 'Feature',
           properties: {
             type: 'path',
@@ -1041,7 +1085,7 @@ function MapperScreen() {
           },
           geometry: { type: 'LineString', coordinates: p.coordinates },
         })),
-        ...photoPins.map((ph) => ({
+        ...realPins.map((ph) => ({
           type: 'Feature',
           properties: {
             type: 'pin',
@@ -1056,10 +1100,12 @@ function MapperScreen() {
       ],
     };
     const blob = new Blob([JSON.stringify(fc, null, 2)], { type: 'application/geo+json' });
+    const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
+    a.href = url;
     a.download = `esut-agbani-${new Date().toISOString().slice(0, 10)}.geojson`;
     a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
     showToast('Downloaded campus GeoJSON');
   };
 
@@ -2297,10 +2343,14 @@ async function uploadPhotoRecord(
 ) {
   const safeZone = payload.zone.split(':')[0].replace(/\s+/g, '-').toLowerCase();
   const safeScout = payload.scout_name.replace(/[^a-zA-Z0-9_-]/g, '_') || 'scout';
-  const path = `${safeZone}/${Date.now()}_${safeScout}.webp`;
+  const isWebp = blob.type === 'image/webp';
+  const ext = isWebp ? 'webp' : 'jpg';
+  const contentType = isWebp ? 'image/webp' : 'image/jpeg';
+  const suffix = crypto.randomUUID().slice(0, 6);
+  const path = `${safeZone}/${Date.now()}_${safeScout}_${suffix}.${ext}`;
   const { error: upErr } = await supabase.storage
     .from('campus-photos')
-    .upload(path, blob, { contentType: 'image/webp', upsert: true });
+    .upload(path, blob, { contentType });
   if (upErr) {
     console.warn('Supabase storage upload failed:', upErr.message);
     throw upErr;
