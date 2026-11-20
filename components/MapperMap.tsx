@@ -16,7 +16,7 @@ const SATELLITE_STYLE: maplibregl.StyleSpecification = {
         "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
       ],
       tileSize: 256,
-      maxzoom: 19,
+      maxzoom: 18,
     },
     labels: {
       type: "raster",
@@ -24,7 +24,7 @@ const SATELLITE_STYLE: maplibregl.StyleSpecification = {
         "https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}",
       ],
       tileSize: 256,
-      maxzoom: 19,
+      maxzoom: 18,
     },
   },
   layers: [
@@ -444,6 +444,8 @@ export default function MapperMap({
       style: SATELLITE_STYLE,
       center: focusCoord ?? ESUT_CENTER,
       zoom: 16.5,
+      minZoom: 13,
+      maxZoom: 22,
       pitch: 0,
       attributionControl: false,
     });
